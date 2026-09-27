@@ -50,9 +50,6 @@ jobs:
     if: needs.actions.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      WEB_HARNESS_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
-      WEB_HARNESS_ACCEPTANCE_KEEP: '1'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -65,6 +62,10 @@ jobs:
       - name: Pull the Playwright image matched to this version
         run: docker pull "mcr.microsoft.com/playwright:v$(node -p "require('playwright/package.json').version")-noble"
       - run: pnpm test:acceptance
+        env:
+          # Kept after the run so a failure's evidence can be uploaded below.
+          WEB_HARNESS_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
+          WEB_HARNESS_ACCEPTANCE_KEEP: '1'
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
