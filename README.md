@@ -18,11 +18,11 @@ Used by chess-mcp, chorequest, tabletop-strategy-companion and training-log. Rea
 ## Install
 
 ```sh
-pnpm add -D github:Azeajr/web-harness#v0.1.1   # or: npm i -D github:Azeajr/web-harness#v0.1.1
+pnpm add -D github:Azeajr/web-harness#v0.1.2   # or: npm i -D github:Azeajr/web-harness#v0.1.2
 ```
 
-Peer dependencies: `playwright` (≥ 1.62; the Docker image is matched to your version) and, for the
-Vite plugin, `vite`.
+Peer dependency: `playwright` (≥ 1.62; the Docker image is matched to your version). The Vite plugin
+imports nothing from Vite and fits any major.
 
 ```ts
 // vite.config.ts
@@ -42,10 +42,10 @@ export const test = createHarnessTest(base, harness)
 
 ```yaml
 # .github/workflows/ci.yml (excerpt)
-- uses: Azeajr/web-harness/.github/actions/scope@v0.1.1
-- uses: Azeajr/web-harness/.github/actions/setup@v0.1.1
+- uses: Azeajr/web-harness/.github/actions/scope@v0.1.2
+- uses: Azeajr/web-harness/.github/actions/setup@v0.1.2
   with: { node-version: 24, browsers: chromium }
-- uses: Azeajr/web-harness/.github/actions/verdict@v0.1.1
+- uses: Azeajr/web-harness/.github/actions/verdict@v0.1.2
   with: { needs: '${{ toJSON(needs) }}', code: '${{ needs.scope.outputs.code }}', required: checks e2e smoke }
 ```
 

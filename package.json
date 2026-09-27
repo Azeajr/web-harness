@@ -1,6 +1,6 @@
 {
   "name": "@azeajr/web-harness",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Shared development and verification harness for offline-first Vite PWAs: agent browser sessions, one fault policy for exploration and tests, production smoke, container E2E, and CI gates.",
   "license": "MIT",
   "type": "module",
@@ -42,8 +42,7 @@
     "check": "node --check bin/web-harness.mjs && for f in src/*.mjs; do node --check \"$f\" || exit 1; done && pnpm test"
   },
   "peerDependencies": {
-    "playwright": ">=1.62.0",
-    "vite": ">=6"
+    "playwright": ">=1.62.0"
   },
   "devDependencies": {
     "playwright": "1.63.0"
@@ -51,10 +50,5 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@12.3.4",
-  "peerDependenciesMeta": {
-    "vite": {
-      "optional": true
-    }
-  }
+  "packageManager": "pnpm@12.3.4"
 }

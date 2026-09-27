@@ -162,6 +162,11 @@ export async function main(argv) {
   }
 
   async function copyReport() {
+    try {
+      await cp(path.join(workspace, "e2e-results.json"), path.join(root, "e2e-results.json"));
+    } catch {
+      /* the run died before the reporter wrote anything */
+    }
     const source = path.join(workspace, e2e.report);
     try {
       await access(source);
@@ -196,7 +201,7 @@ export async function main(argv) {
       "export PATH=/tmp/pnpm-bin:$PATH",
       packageManager(config),
       ...e2e.prepare,
-      `npx --no-install playwright test --config ${JSON.stringify(e2e.config)} --reporter=list,html${updateSnapshots ? " --update-snapshots" : ""}${callerSetWorkers ? "" : " --workers=1"} "$@"`,
+      `npx --no-install playwright test --config ${JSON.stringify(e2e.config)} --reporter=list,html,json${updateSnapshots ? " --update-snapshots" : ""}${callerSetWorkers ? "" : " --workers=1"} "$@"`,
     ].join("\n");
     testStarted = true;
     await docker(
@@ -223,6 +228,9 @@ export async function main(argv) {
         // only ever compared where they were taken.
         "-e",
         "WEB_HARNESS_CONTAINER=1",
+        // JSON results come back beside the HTML report, for `web-harness scenarios --results`.
+        "-e",
+        "PLAYWRIGHT_JSON_OUTPUT_NAME=/work/e2e-results.json",
         ...(prebuilt ? ["-e", "WEB_HARNESS_PREBUILT=1"] : []),
         "-e",
         "HOME=/tmp",
