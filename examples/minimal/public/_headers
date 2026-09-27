@@ -1,0 +1,6 @@
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+
+/sw.js
+  Cache-Control: no-cache

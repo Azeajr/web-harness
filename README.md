@@ -69,8 +69,24 @@ pnpm install
 pnpm check          # syntax + unit tests (one test drives a real Chromium)
 ```
 
+```sh
+pnpm test:acceptance   # real sessions, smoke and container E2E against examples/minimal
+```
+
+The acceptance suite packs this repository, installs it into a copy of `examples/minimal` and
+drives it through the installed bin. It is heavy — one 3 GiB session container at a time, then a
+container E2E run — so run it alone. It needs Docker, the Playwright image for this version
+(`docker pull mcr.microsoft.com/playwright:v<version>-noble`) and a host Chromium.
+
+## Releasing
+
 Released by tag. Consumers pin a tag in both the dependency and the `uses:` references; bump them
-together.
+together (`web-harness doctor` warns when a workflow's `uses:` differs from the installed version).
+
+1. Merge to `main` with `verdict` green (it includes the acceptance suite).
+2. Bump `version` in `package.json`, and every `#vX.Y.Z` / `@vX.Y.Z` in this README.
+3. Tag `vX.Y.Z` on the merge commit and push the tag.
+4. In each consumer: bump the dependency and every `uses: Azeajr/web-harness/...@vX.Y.Z` in one PR.
 
 ## License
 

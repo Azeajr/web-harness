@@ -1,0 +1,18 @@
+{
+  "name": "web-harness-example",
+  "private": true,
+  "type": "module",
+  "description": "The smallest offline-first PWA that exercises every web-harness adapter hook. The acceptance suite (test/acceptance) packs web-harness, installs it here and drives this app.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "harness": "web-harness",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@azeajr/web-harness": "file:../..",
+    "playwright": "1.63.0",
+    "vite": "^8.3.0",
+    "vite-plugin-pwa": "^1.3.0"
+  }
+}

@@ -20,6 +20,7 @@ import {
   IDENTITY_META,
   IDENTITY_PATH,
   LABEL_ROOT,
+  LABEL_SESSION,
   LABEL_TOKEN,
   availablePort,
   acquirePortLease,
@@ -56,6 +57,8 @@ import {
 } from "./browser.mjs";
 import { batchSource } from "./batch.mjs";
 import { functionSource, loadConfig } from "./config.mjs";
+import { checkBudget, describeBudget, formatSize, parseSize } from "./resources.mjs";
+import { describeDrift, versionDrift } from "./versions.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverEntry = await realpath(path.join(here, "server.mjs"));
@@ -130,7 +133,8 @@ Start/preflight: --target dev|production (default dev) --fixture NAME
   --port PORT (default ${config.port}; use distinct ports for concurrent sessions)
   --url URL (dev only: identity-verified existing localhost server; never stopped) --route /
   --setup REPO_FILE (trusted async page => {...} returning JSON postconditions)
-  --workflow SLUG --output DIRECTORY (default .web-harness; repeat for later commands)${config.options.length ? `\n  Project options: ${config.options.map((name) => `--${name}`).join(" ")}` : ""}
+  --workflow SLUG --output DIRECTORY (default .web-harness; repeat for later commands)
+  --force-resources (start although the memory budget refuses; recorded in the manifest)${config.options.length ? `\n  Project options: ${config.options.map((name) => `--${name}`).join(" ")}` : ""}
 Fixtures:
 ${fixtures}
 Reset refuses changed fixture/setup digests; use stop/start to establish a changed baseline.
@@ -445,6 +449,16 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         await serverIdentity(reviewUrl(options, config.port), root);
       } else await availablePort(reviewUrl(options, config.port));
     }
+    // The session's container bound plus the host server's heap: what this session may grow to.
+    const resources = await checkBudget({
+      docker,
+      need: parseSize(containerMemory) + Number(serverHeapMb) * 1024 ** 2,
+      label: "Session",
+      force: options["force-resources"],
+    });
+    if (resources.forced) console.error(describeBudget(resources, "Session (forced)"));
+    const drift = await versionDrift(root);
+    for (const warning of describeDrift(drift)) console.error(`warning: ${warning}`);
     const report = {
       project: config.name,
       node: process.version,
@@ -457,9 +471,31 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       targets: ["dev", ...(config.production ? ["production"] : [])],
       fixtures: Object.keys(config.fixtures),
       stateSections: config.state.sections,
+      resources: {
+        ok: resources.ok,
+        forced: resources.forced,
+        need: formatSize(resources.need),
+        margin: formatSize(resources.margin),
+        usable: formatSize(resources.usable),
+        swap: formatSize(resources.swap),
+        running: resources.containers.map((container) => container.name),
+      },
+      webHarness: { version: drift.version, workflowMismatches: drift.mismatches.length },
     };
     console.log(JSON.stringify(report, null, 2));
-    return { image, imageId, browser, device, descriptor };
+    return {
+      image,
+      imageId,
+      browser,
+      device,
+      descriptor,
+      limits: {
+        containerMemory,
+        containerCpus,
+        serverHeapMb: Number(serverHeapMb),
+        forcedResources: resources.forced,
+      },
+    };
   }
 
   // Build once per session into a session-owned directory: the repository's own dist/ is not
@@ -939,6 +975,8 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         `${LABEL_ROOT}=${root}`,
         "--label",
         `${LABEL_TOKEN}=${manifest.token}`,
+        "--label",
+        `${LABEL_SESSION}=${session}`,
         "--user",
         `${process.getuid()}:${process.getgid()}`,
         "-e",

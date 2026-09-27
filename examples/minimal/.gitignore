@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.web-harness/
+test-results/
+playwright-report/
+e2e-results.json
+reports/
+package-lock.json
