@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { A11Y_BOUNDARY, axeLoaderSource, axeSource, classifyA11y, runAxe } from "./a11y.mjs";
 import { directoryDigest } from "./core.mjs";
 import { sourceIdentity } from "./provenance.mjs";
 import { outcome } from "./status.mjs";
@@ -19,13 +20,15 @@ import { watchContext } from "./watch.mjs";
 //   1. headers   every required header (and value) on every named path
 //   2. bundle    the HTML is a production build (no Vite client, no /src/ module entry)
 //   3. globals   no development accessor leaked into the bundle
-//   4. sw        a service worker registers, and controls the page after one reload
-//   5. persist   a visible action the project names survives a reload
-//   6. offline   with the network cut, a reload renders the shell and the persisted data
-//   7. online    back online, a reload still renders it and nothing fails on reconnect
-//   8. update    a new version is detected, waits for consent, activates when accepted, keeps the
+//   4. a11y      with the adapter's `a11y` block (and axe-core installed): no axe violation at or
+//                above its impact on the first screen
+//   5. sw        a service worker registers, and controls the page after one reload
+//   6. persist   a visible action the project names survives a reload
+//   7. offline   with the network cut, a reload renders the shell and the persisted data
+//   8. online    back online, a reload still renders it and nothing fails on reconnect
+//   9. update    a new version is detected, waits for consent, activates when accepted, keeps the
 //                user's data and does not reload in a loop
-//   9. faults    nothing above produced a page error, failed request, HTTP error or external call
+//  10. faults    nothing above produced a page error, failed request, HTTP error or external call
 //
 // Proof boundary: Chromium only, a local static server, no Pages Functions, no real device. It
 // establishes that THIS artifact installs, works offline and updates, not that the edge or iOS
@@ -181,6 +184,17 @@ export async function main(argv) {
     );
     if (leaked.length) throw new Error(`Development globals in production: ${leaked.join(", ")}.`);
     pass("globals", devGlobals);
+
+    if (config.a11y && smoke.a11y !== false) {
+      report.phase = "a11y";
+      const loadAxe = new Function(`return (${axeLoaderSource(await axeSource(config.root))})`)();
+      const scan = classifyA11y(await runAxe(page, config.a11y, loadAxe), config.a11y);
+      report.a11y = { impact: config.a11y.impact, records: [...scan.faults, ...scan.warnings], boundary: A11Y_BOUNDARY };
+      report.warnings.push(...scan.warnings.map((warning) => warning.detail));
+      const counted = scan.faults.filter((fault) => !fault.excusedBy);
+      if (counted.length) throw new Error(`Accessibility: ${counted.map((fault) => fault.detail).join("; ")}.`);
+      pass("a11y", { excused: scan.faults.length, warnings: scan.warnings.length });
+    }
 
     const serviceWorker = smoke.serviceWorker !== false;
     if (serviceWorker) {

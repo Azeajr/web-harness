@@ -10,6 +10,10 @@
     <main>
       <h1>Notes</h1>
       <label>Note <input id="note" autocomplete="off" /></label>
+      <!-- An icon button: its name comes from aria-label alone, so removing it is an a11y fault. -->
+      <button id="clear" type="button" aria-label="Clear note">
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" /></svg>
+      </button>
       <button id="save" type="button">Save</button>
       <button id="archive" type="button" disabled>Archive</button>
       <button id="delete" type="button">Delete…</button>

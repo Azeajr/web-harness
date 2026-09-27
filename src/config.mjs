@@ -2,6 +2,7 @@ import { access, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Script } from "node:vm";
+import { a11yConfig } from "./a11y.mjs";
 import { TRACE_MODES, slug } from "./core.mjs";
 import { DEFAULT_REDACT_QUERY } from "./evidence.mjs";
 import { faultPolicy } from "./faults.mjs";
@@ -101,6 +102,9 @@ export function validateConfig(raw, root) {
     functionSource(raw.durable.read, "durable.read");
   }
   config.scenarios = raw.scenarios ?? [];
+  config.a11y = raw.a11y === undefined || raw.a11y === false ? null : a11yConfig(raw.a11y);
+  if (raw.e2e?.fixtures !== undefined && typeof raw.e2e.fixtures !== "string")
+    throw new Error("e2e.fixtures must be the path of the module that exports the project's test and expect.");
   return config;
 }
 

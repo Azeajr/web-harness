@@ -11,6 +11,7 @@
   },
   "devDependencies": {
     "@azeajr/web-harness": "file:../..",
+    "axe-core": "4.13.0",
     "playwright": "1.63.0",
     "vite": "^8.3.0",
     "vite-plugin-pwa": "^1.3.0"

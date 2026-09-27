@@ -35,7 +35,8 @@
     "src",
     "types",
     "docs",
-    "schemas"
+    "schemas",
+    "skills"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
@@ -43,9 +44,16 @@
     "check": "node --check bin/web-harness.mjs && for f in src/*.mjs; do node --check \"$f\" || exit 1; done && pnpm test"
   },
   "peerDependencies": {
+    "axe-core": ">=4.10.0",
     "playwright": ">=1.62.0"
   },
+  "peerDependenciesMeta": {
+    "axe-core": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "axe-core": "4.13.0",
     "playwright": "1.63.0"
   },
   "engines": {

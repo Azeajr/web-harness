@@ -9,7 +9,8 @@ export type FaultKind =
   | "http"
   | "external"
   | "infrastructure"
-  | "layout-overflow";
+  | "layout-overflow"
+  | "a11y";
 
 export interface FaultConfig {
   /** Project-wide excuses for page/console noise. Regex sources or flagless RegExps. */
@@ -133,6 +134,8 @@ export interface HarnessConfig {
     devGlobals?: string[];
     serviceWorker?: boolean;
     offline?: boolean;
+    /** false skips the a11y phase even when the adapter has an a11y block. */
+    a11y?: boolean;
     allowedFaults?: (string | RegExp)[];
     /** Node side (closures fine). */
     ready?: (page: Page) => Promise<void>;
@@ -164,9 +167,24 @@ export interface HarnessConfig {
     prepare?: string[];
     snapshots?: string[];
     report?: string;
+    /** The module exporting the project's `test` (createHarnessTest) and `expect`; promote imports it. */
+    fixtures?: string;
   };
   mutate?: { install?: string[]; command?: string[]; reports?: string[] };
   scenarios?: Scenario[];
+  /**
+   * Accessibility scan (needs axe-core in the project): check --a11y, the checkA11y fixture and the
+   * smoke's a11y phase. Violations at or above `impact` are faults; `disable` keeps a rule's
+   * findings but excuses them.
+   */
+  a11y?:
+    | false
+    | {
+        impact?: "minor" | "moderate" | "serious" | "critical";
+        disable?: string[];
+        include?: string[];
+        exclude?: string[];
+      };
 }
 
 export declare function defineHarness(config: HarnessConfig): HarnessConfig;

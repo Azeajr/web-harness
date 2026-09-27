@@ -23,9 +23,7 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 
 | ID | Item | Size | Milestone |
 |---|---|---|---|
-| [A2](#a2-agent-skill-shipped-with-the-package) | Agent skill shipped with the package | S | M4 |
-| [A3](#a3-promote-a-batch-into-a-test) | Promote a batch into a test | M | M4 |
-| [A4](#a4-accessibility-scan) | Accessibility scan | M | M4 |
+| [A5](#a5-record-a-batch-from-cli-actions) | Record a batch from CLI actions (optional) | S | M4 follow-up |
 | [G2](#g2-reusable-extended-workflow) | Reusable extended workflow (scheduled) | M | M5 |
 | [H3](#h3-measure-the-harness-itself) | Measure the harness itself | M | M5 |
 
@@ -43,97 +41,29 @@ every `uses:` reference together (README, "Released by tag").
 - **M3 — Determinism and provenance** shipped: clock, timezone and locale (P1), run manifest v3
   (P2), one status vocabulary (P3), scenario reports tied to source and build (P4), reconcile after
   an unknown outcome (P5), redaction (P6) and the host server's isolated environment (H2).
-- **M4 — Agent ergonomics.** Ship the skill, close the promote-to-test step, add accessibility.
+- **M4 — Agent ergonomics** shipped: the agent skill with `describe` and `skill install` (A2),
+  `promote` with `applyHarnessFixture` and `batchHelpers` (A3), and the accessibility scan (A4).
+  One optional follow-up remains (A5).
 - **M5 — Extended tier and measurement.** Scheduled coverage and harness performance baselines.
 
 ---
 
-## M4 — Agent ergonomics
+## M4 follow-up
 
-### A2. Agent skill shipped with the package
+### A5. Record a batch from CLI actions
 
-**Why.**
-- chess-mcp has `.agents/skills/ux-review/SKILL.md` (22 lines, pointing at its `docs/UX_REVIEW.md`).
-- training-log, tabletop and chorequest have no skill that tells an agent the harness exists or how
-  to use it; training-log has only a paragraph in `CLAUDE.md`.
-- The rules that make agent evidence trustworthy live in `docs/HARNESS.md` and are easy to skip:
-  zero faults is not completion, inspect the PNG, record every attempt, promote to a test, one heavy
-  job at a time.
+**Why.** An agent that explores command by command (`cli click e12`, `cli fill e7 …`) has no batch
+file to `promote`. The Playwright CLI (1.63) has `recording-start` and `recording-stop`.
 
-**Design.**
-- `skills/web-harness/SKILL.md` in the package (added to `files`). It is generic:
-  - when to use the harness;
-  - the loop;
-  - the commands and what each proves;
-  - the evidence rules (the run's `review.md`, inspecting images, E1 bundles, E2 effects);
-  - host safety (H1 and `doctor`);
-  - proof boundaries (emulated WebKit is not iOS).
-  Project specifics are not copied into it.
-- `web-harness describe --json` prints what an agent needs about this project, read from the
-  config: fixtures and descriptions, state sections, scenarios with status, targets, ports, the
-  E2E port, smoke hooks present, and the commands. The skill tells the agent to run it first.
-  `help` already prints fixtures (`src/controller.mjs:108-139`); this is the machine-readable form.
-- `web-harness skill install [--dir .claude/skills | .agents/skills]` copies the skill (a copy, not
-  a symlink, because node_modules paths change) with a version header. `doctor` warns when the
-  installed copy's version differs from the package's.
-- A consumer keeps a project skill (like chess's `ux-review`) for app-specific journeys, and it
-  links to the shared one.
+**Today.** Not built. `promote` needs a batch file written by hand.
 
-**Acceptance.**
-- A unit test checks that every command the skill mentions exists in the CLI's command list
-  (`commands` in `src/core.mjs:11`), so the skill cannot drift from the CLI.
-- Installed in the three consumers that lack a skill (Appendix A).
+**Design.** `web-harness record start|stop [--to batches/NAME.js]` wraps the CLI's recording in the
+owned session and turns what it produced into a batch function (`async (page, { step }) => …`), one
+`step` per recorded action. Verify first what `recording-stop` emits in 1.63 (script text, a JSON
+action log, or a trace); if it is not stable enough to transform, drop this item.
 
-### A3. Promote a batch into a test
-
-**Why.** The last step of the loop: "promote the reproduction into an ordinary test"
-(`docs/HARNESS.md:5-8`), and "exploration is not coverage until it lands as a test"
-(`docs/HARNESS.md:106-107`). Today it is manual, so it is often skipped.
-
-**Design.**
-- A Playwright-side fixture helper first, useful on its own:
-  `applyHarnessFixture(page, harness, name)` in `@azeajr/web-harness/playwright`. It runs the
-  adapter's `fixtures[name].prepare` then `apply` in a test, the same path the controller uses
-  (`src/browser.mjs:87-103`), so tests and sessions share fixtures instead of duplicating seeding
-  code. Test code runs in Node, so `prepare` output can be written to a temporary `dataFile`.
-- `web-harness promote BATCH_FILE --to tests/e2e/<name>.spec.ts --title "…" [--fixture NAME]
-  [--scenario ID]` generates a spec that:
-  - imports the project's `test` (from config `e2e.fixtures`, for example `tests/e2e/fixtures.ts`);
-  - calls `applyHarnessFixture`;
-  - inlines the batch function;
-  - maps `step` to `test.step`, `assert` to `expect(cond, message).toBeTruthy()`, and
-    `observe`/`state`/`effect` to exported helpers with the same behaviour.
-  It prints the `covers` entry to add under the scenario rather than editing the config.
-- Optional: `web-harness record` wraps the Playwright CLI's `recording-start`/`recording-stop`
-  (present in 1.63) to turn a sequence of manual `cli` actions into a batch file, which can then be
-  promoted.
-
-**Acceptance.** A batch from G1 promoted into `examples/minimal` passes under `web-harness e2e`, and
-`scenarios --results` maps it as `verified`.
-
-### A4. Accessibility scan
-
-**Why.** No consumer runs an accessibility check. `check` covers faults and overlays rendered
-off-screen only (`src/controller.mjs:599-673`, `src/browser.mjs:141-175`). An agent reviewing a
-phone layout currently has no signal for unlabeled controls or low contrast.
-
-**Design.**
-- `axe-core` becomes an optional peer dependency.
-- Controller: `check --a11y`, or the config below. The controller reads `axe.min.js` from the host's
-  `node_modules` and ships it into the page through the `run-code` file (run-code cannot import),
-  then runs `axe.run(document, options)`.
-  ```js
-  a11y: { impact: 'serious', disable: ['color-contrast'], include: ['main'] }
-  ```
-- Violations at or above `impact` become faults of a new kind, `a11y`, carrying the rule ID, target
-  selector, count and help URL. Lower-impact violations become warnings.
-- Playwright: a `checkA11y(page, options)` fixture helper with the same config and classification.
-- Smoke: an optional `a11y` phase on `/` after `load`.
-- Proof boundary: automated rules find a subset of WCAG problems. A clean scan does not certify
-  accessibility, and the report says so.
-
-**Acceptance.** An unlabeled icon button in the example is an `a11y` fault in `check --a11y`, in the
-fixture and in the smoke. `disable: ['button-name']` excuses it, and the record is still kept.
+**Acceptance.** Recording a save in `examples/minimal`, then `promote`, gives a spec that passes
+under `web-harness e2e`.
 
 ---
 
@@ -213,8 +143,11 @@ Kept here so they are not lost. Each happens in the consumer's own repository, t
   in the dependency and in every `uses:`, together.
 - **chess-mcp E2E evidence.** Its Playwright config has no retries, trace, screenshot or video.
   Adopting A1 fixes it; until then, add them directly.
-- **Skills.** Install A2 in training-log, tabletop and chorequest. chess-mcp links its `ux-review`
-  skill to the shared one.
+- **Skills.** Run `web-harness skill install` in training-log, tabletop and chorequest. chess-mcp
+  links its `ux-review` skill to the shared one.
+- **Accessibility.** Add `axe-core` and an `a11y` block to opt into `check --a11y`, `checkA11y` and
+  the smoke's `a11y` phase; start with `impact: 'critical'` and tighten.
+- **Promote.** Set `e2e.fixtures` where the fixtures module is not `tests/e2e/fixtures.ts`.
 - **Update-flow hooks.** Each consumer adds `smoke.update.prompt`/`accept` for its own prompt (O1).
 - **Environment.** chorequest moves its clock pin from `apply` into `environment` (P1).
   training-log should decide its timezone variants (sessions and cycles are date-driven).
@@ -266,7 +199,7 @@ For orientation, and so that nobody re-implements these:
 | A | `run` with step history | built, with attempts |
 | A | `observe`, `state` | built |
 | A | `effect` | built (batch helper and command) |
-| A | `check` | built; a11y → A4 |
+| A | `check` | built, with `--a11y` |
 | A | reload / restart / reset / stop | built |
 | A | `report` for the exact source/build, keeping failed attempts | built (attempts; `scenarios --lane`, `--build-digest`) |
 | A | isolate HOME/XDG | built (browser and host server) |
@@ -278,7 +211,7 @@ For orientation, and so that nobody re-implements these:
 | C | redaction | built (query values, no headers or bodies; traces flagged) |
 | C | retries as attempts | built |
 | C | reconcile before replaying after an unknown outcome | built (`reconcile`, `--after-unknown`) |
-| D | named fixtures through real import paths | built (adapter `fixtures`); in tests → A3 `applyHarnessFixture` |
+| D | named fixtures through real import paths | built (adapter `fixtures`; in tests, `applyHarnessFixture`) |
 | D | clock / locale / timezone, DST variants | built (`environment`, batch `clock`); variants run by **G2** |
 | D | one fault policy; expected faults local, counted, missing ones fail | built, in tests and batches |
 | D | infrastructure vs application failure by source | built (`infrastructure_failed` by source) |
