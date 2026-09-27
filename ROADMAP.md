@@ -23,8 +23,6 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 
 | ID | Item | Size | Milestone |
 |---|---|---|---|
-| [O1](#o1-update-flow-in-the-production-smoke) | Update flow in the production smoke | M | M2 |
-| [O2](#o2-smoke-back-online-and-header-values) | Smoke: back online, and header values | S | M2 |
 | [P1](#p1-clock-timezone-and-locale) | Clock, timezone and locale | M | M3 |
 | [P2](#p2-run-manifest-v3) | Run manifest v3 | M | M3 |
 | [P3](#p3-one-status-vocabulary) | One status vocabulary | S | M3 |
@@ -47,104 +45,13 @@ every `uses:` reference together (README, "Released by tag").
   `examples/minimal` in CI (G1), and housekeeping. Later items are proven by extending that suite.
 - **M1 — Agent evidence** shipped: failure bundles (E1), `effect` (E2), attempts and flaky
   scenarios (E3), batch-local fault expectations (E4) and the shared Playwright preset (A1).
-- **M2 — Offline-first proof.** O1 closes the one common PWA failure nothing checks today: a new
-  deploy that never reaches, or breaks, an installed client.
+- **M2 — Offline-first proof** shipped: the smoke's update phase (O1), the online phase and
+  header value rules (O2).
 - **M3 — Determinism and provenance.** Make every run reproducible and attributable: environment
   pinned, manifest complete, one status vocabulary, scenario results tied to the build, no blind
   replays, nothing sensitive in evidence, the host server isolated.
 - **M4 — Agent ergonomics.** Ship the skill, close the promote-to-test step, add accessibility.
 - **M5 — Extended tier and measurement.** Scheduled coverage and harness performance baselines.
-
----
-
-## M2 — Offline-first proof
-
-### O1. Update flow in the production smoke
-
-**Why.**
-- The design review's production tier lists "worker/SW update flows".
-- All four consumers use `registerType: 'prompt'`: training-log `vite.config.ts:79`, tabletop
-  `:52`, chorequest `:41`, chess `apps/ui/vite.config.ts:24`. A new deploy must wait for the user.
-- Failure modes nothing checks today:
-  - the new worker is never detected;
-  - the prompt never appears;
-  - the new worker activates without consent;
-  - activation deletes user data (an over-eager cache cleanup);
-  - a reload loop;
-  - the old tab breaks while the new worker waits.
-
-**Today.**
-- The smoke's phases are headers, bundle, globals, sw, persist, offline and faults
-  (`src/smoke.mjs:11-21`). There is no second version.
-- Only chess tests updates, in its own `apps/ui/test/pwa-lifecycle.mjs`, which runs in chess CI
-  (`chess-mcp/.github/workflows/ci.yml:126-128`). It builds two instrumented versions (A and B) and
-  checks that B waits, that a running operation defers the prompt, and that "Later" then "Reload"
-  lands on B.
-
-**Design.** A new smoke phase, `update`, after `offline`:
-1. **Version B without a rebuild.** Copy the dist to a sibling directory and change only the
-   service-worker script's bytes: append `// web-harness update probe <nonce>` to the file named by
-   `smoke.update.sw` (default `sw.js`). The browser byte-compares the script, so this is a new
-   version. Version A stays exactly the artifact that ships. The limit: the precache manifest is
-   unchanged, so this proves the lifecycle, not the fetching of new assets. A project that wants a
-   genuinely different B provides `smoke.update.build(outDir)`, as chess does with its build IDs.
-2. **Swappable server.** `createStaticServer` (`src/static-server.mjs`) gains `swap(dir)`, which
-   atomically points the server at another directory.
-3. **Detection.** With A controlling the page and the persist token present, swap to B, call
-   `registration.update()` from the page, and poll from Node (not `waitForFunction` with an async
-   predicate; see `docs/HARNESS.md:54-56`) until `registration.waiting` is non-null. Fail after
-   30 s with "no waiting worker".
-4. **A keeps working.** The controller's script is still A's. The adapter's `verify(page, token)`
-   passes, and no fault was recorded.
-5. **Consent.** The adapter's `smoke.update.prompt(page)` must find the visible prompt (for
-   example "A new version is ready") within 10 s. Then `smoke.update.accept(page)` clicks it. If a
-   `controllerchange` fires before accept, the phase fails with "activated without consent" (in
-   `'prompt'` mode).
-6. **Activation.** After accept, wait for `controllerchange` and the reload. Then
-   `registration.waiting` is null, the active worker's script contains the nonce (fetched through
-   the page), `verify(page, token)` still passes (activation kept the user's data), and there was
-   at most one navigation in the following 5 s (no reload loop).
-7. **Optional "Later".** When `smoke.update.dismiss(page)` is given: dismiss, reload, and expect the
-   prompt to return (as chess checks today).
-8. **Faults.** The same fault policy applies throughout, and the phase is recorded in the report.
-
-Config:
-```js
-smoke: { update: { sw: 'sw.js', mode: 'prompt', prompt, accept, dismiss, build } }
-// update: false skips the phase; mode 'auto' expects activation without a prompt
-```
-
-**Acceptance.**
-- `examples/minimal` passes, and so do all four consumers once they add their `prompt`/`accept`
-  hooks.
-- Reverse checks on the example, each failing the named step:
-  - `self.skipWaiting()` in the worker under `prompt` mode → "activated without consent" (step 5);
-  - a prompt that never renders → step 5;
-  - an `activate` handler that deletes the app's data cache or database → `verify` fails (step 6);
-  - `sw.js` served with a year-long `Cache-Control` → "no waiting worker" (step 3; see O2).
-
-**Note.** chess keeps its instrumented lifecycle test: operation deferral is app-specific. This
-phase is the common floor for every consumer, not a replacement.
-
-### O2. Smoke: back online, and header values
-
-- **Back online.** The offline phase switches the network back on and passes without looking
-  (`src/smoke.mjs:132-140`). Add: reload while online, `ready`, `verify(page, token)`, and no
-  `requestfailed` after reconnecting. An optional `smoke.reconnect(page)` covers apps that do
-  something on reconnect (chorequest's sync talks to `/api/`, which is unserved here, so for it this
-  step only proves nothing breaks).
-- **Header values, not just presence.** Today the smoke checks that each required header exists on
-  `/` (`src/smoke.mjs:68-71`). Allow per-path rules with value patterns:
-  ```js
-  requiredHeaders: {
-    '/': ['x-content-type-options', { name: 'content-security-policy', match: /script-src 'self'/ }],
-    '/sw.js': [{ name: 'cache-control', match: /no-cache|max-age=0/ }],   // a cached SW blocks updates
-    '/assets/*': [{ name: 'cache-control', match: /immutable/ }],          // first matching file
-  }
-  ```
-  The array form stays valid and means `/` only.
-- **Acceptance.** The example with a CSP missing `script-src` fails `headers`. The example with a
-  long-cached `sw.js` fails both `headers` and O1.
 
 ---
 
@@ -664,8 +571,8 @@ For orientation, and so that nobody re-implements these:
 | D | clock / locale / timezone, DST variants | **P1**, run by **G2** |
 | D | one fault policy; expected faults local, counted, missing ones fail | built, in tests and batches |
 | D | infrastructure vs application failure by source | partly built (`infrastructure-failed`); **P3** |
-| E | production tier: SW update flows | **O1** |
-| E | production tier: offline/reconnect, security headers | offline and presence built; **O2** |
+| E | production tier: SW update flows | built (smoke `update` phase) |
+| E | production tier: offline/reconnect, security headers | built (`offline`, `online`, header value rules) |
 | E | extended tier on a schedule | **G2** |
 | E | always-reporting aggregate verdict; deploy consumes the validated artifact | built |
 | E | fail on focused-only tests | built (`harnessPlaywright`) |

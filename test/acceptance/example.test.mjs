@@ -280,7 +280,9 @@ test("smoke: passes the example build, and fails each broken variant in the righ
   await t.test("the real build passes every phase", async () => {
     const { code, report } = await smoke("dist", "ok");
     assert.equal(code, 0, JSON.stringify(report.checks));
-    assert.deepEqual(report.checks.map((check) => check.name), ["headers", "bundle", "globals", "sw", "persist", "offline", "faults"]);
+    assert.deepEqual(report.checks.map((check) => check.name), ["headers", "bundle", "globals", "sw", "persist", "offline", "online", "update", "faults"]);
+    const update = report.checks.find((check) => check.name === "update").detail;
+    assert.deepEqual(update, { mode: "prompt", detected: true, consent: true, dismissed: "prompt returned after a reload", activated: true, navigations: 1 });
   });
 
   await t.test("a missing required header fails headers", async () => {
@@ -290,8 +292,56 @@ test("smoke: passes the example build, and fails each broken variant in the righ
     });
     const { code, report } = await smoke(dist, "headers");
     assert.equal(code, 1);
-    assert.equal(failedPhase(report), "http");
-    assert.match(report.error, /x-content-type-options/);
+    assert.equal(failedPhase(report), "headers");
+    assert.match(report.error, /\/: missing x-content-type-options/);
+  });
+
+  await t.test("a header whose value regressed fails headers", async () => {
+    const dist = await variant("csp", async (dir) => {
+      const file = path.join(dir, "_headers");
+      await writeFile(file, (await readFile(file, "utf8")).replace("script-src 'self'; ", ""));
+    });
+    const { code, report } = await smoke(dist, "csp");
+    assert.equal(code, 1);
+    assert.equal(failedPhase(report), "headers");
+    assert.match(report.error, /content-security-policy .* does not match \/script-src 'self'\//);
+  });
+
+  await t.test("a long-cached service worker script fails headers", async () => {
+    const dist = await variant("sw-cache", async (dir) => {
+      const file = path.join(dir, "_headers");
+      await writeFile(file, (await readFile(file, "utf8")).replace("Cache-Control: no-cache", "Cache-Control: public, max-age=31536000"));
+    });
+    const { code, report } = await smoke(dist, "sw-cache");
+    assert.equal(code, 1);
+    assert.equal(failedPhase(report), "headers");
+    assert.match(report.error, /\/sw\.js: cache-control/);
+  });
+
+  await t.test("a new version that takes over without consent fails update", async () => {
+    const dist = await variant("skip-waiting", async (dir) => {
+      const file = path.join(dir, "sw.js");
+      await writeFile(file, `self.addEventListener("install", () => self.skipWaiting());\n${await readFile(file, "utf8")}`);
+    });
+    const { code, report } = await smoke(dist, "skip-waiting");
+    assert.equal(code, 1, JSON.stringify(report.checks));
+    assert.equal(failedPhase(report), "update");
+    assert.match(report.error, /activated without consent/);
+  });
+
+  await t.test("an activation that deletes the user's data fails update", async () => {
+    const dist = await variant("wipe", async (dir) => {
+      const file = path.join(dir, "sw.js");
+      const wipe = `self.addEventListener("activate", (event) => event.waitUntil(new Promise((resolve) => {
+  const request = indexedDB.deleteDatabase("notes");
+  request.onsuccess = request.onerror = request.onblocked = () => resolve();
+})));\n`;
+      await writeFile(file, wipe + (await readFile(file, "utf8")));
+    });
+    const { code, report } = await smoke(dist, "wipe");
+    assert.equal(code, 1, JSON.stringify(report.checks));
+    assert.equal(failedPhase(report), "update");
+    assert.match(report.error, /smoke note|Timeout/);
   });
 
   await t.test("a development accessor in the bundle fails globals", async () => {

@@ -80,7 +80,13 @@ export default defineHarness({
   },
   faults: { unservedPrefixes: ["/api/"] },
   smoke: {
-    requiredHeaders: ["content-security-policy", "x-content-type-options"],
+    // Per path, by value: a CSP that stopped restricting scripts, or a long-cached service worker
+    // script, is a regression even though the header is still "there".
+    requiredHeaders: {
+      "/": [{ name: "content-security-policy", match: "script-src 'self'" }, "x-content-type-options"],
+      "/sw.js": [{ name: "cache-control", match: "no-cache|max-age=0" }],
+      "/assets/*": [{ name: "cache-control", match: "immutable" }],
+    },
     ready,
     persist: async (page) => {
       await page.getByRole("textbox", { name: "Note" }).fill("smoke note");
@@ -90,6 +96,12 @@ export default defineHarness({
     },
     verify: async (page, text) => {
       await page.locator("#saved").filter({ hasText: text }).waitFor({ timeout: 10_000 });
+    },
+    // The app's own update prompt: a new version waits until the person accepts it.
+    update: {
+      prompt: (page) => page.getByRole("alert").filter({ hasText: "A new version is ready." }).waitFor({ timeout: 15_000 }),
+      accept: (page) => page.getByRole("button", { name: "Reload" }).click(),
+      dismiss: (page) => page.getByRole("button", { name: "Later" }).click(),
     },
   },
   e2e: { config: "playwright.config.js", snapshots: [] },

@@ -208,10 +208,35 @@ failing test. `web-harness scenarios` reports a scenario whose test passed only 
 ## Production smoke
 
 `web-harness smoke [--dist DIR]` serves the build and, in a fresh Chromium profile, checks in order:
-required headers on `/`; a production bundle (no Vite client, no `/src/`); no development globals;
-a service worker that controls the page after one reload; the project's `persist` action surviving
-a reload; the same surviving an offline reload; and no faults throughout. It writes
-`.web-harness/smoke/report.json` with the build digest.
+
+1. **headers** — every rule in `smoke.requiredHeaders`: names on `/` (array form), or per path with
+   value patterns, e.g. a CSP that still has `script-src 'self'`, a `sw.js` that is not
+   long-cached, hashed assets that are `immutable` (`/assets/*` checks the first built file);
+2. **bundle** — a production build (no Vite client, no `/src/`);
+3. **globals** — no development accessor;
+4. **sw** — a service worker controls the page after one reload;
+5. **persist** — the project's `persist` action survives a reload;
+6. **offline** — the same survives an offline reload;
+7. **online** — back online, a reload still works and `reconnect` (if any) succeeds;
+8. **update** — see below;
+9. **faults** — nothing above faulted.
+
+It writes `.web-harness/smoke/report.json` with the build digest, and on failure `failure.png`,
+`network.jsonl` and `console.jsonl`.
+
+**The update phase** publishes a second version on the same origin (the build with only the
+service-worker script's bytes changed — or `smoke.update.build(outDir)`) and asks the registration
+to update. In `prompt` mode (the default; every consumer's `registerType`) it requires that the new
+worker is found and *waits*, that the old one keeps serving and the persisted data still verifies,
+that nothing takes over without consent, then — with `smoke.update.prompt` and `accept` — that the
+app's own prompt appears, accepting it activates the new worker, the data survives activation, and
+the page reloads once, not in a loop. `dismiss`, when given, must bring the prompt back after a
+reload. Without `prompt`/`accept`, activation is reported as not exercised. `mode: 'auto'` expects
+the new version to take over by itself. The proof boundary: the second version proves the update
+lifecycle, not the fetching of changed assets; a real second build covers that.
+
+A long-cached `sw.js` does not stop an update in current browsers (update checks bypass the HTTP
+cache by default), but it is still a deploy mistake worth failing: that is a header rule.
 
 ## CI shape
 

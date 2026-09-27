@@ -107,7 +107,11 @@ export interface HarnessConfig {
   evidence?: EvidenceConfig;
   smoke?: {
     dist?: string;
-    requiredHeaders?: string[];
+    /**
+     * Header names required on /, or per path (a trailing * checks the first built file under
+     * it) with optional value patterns: { "/sw.js": [{ name: "cache-control", match: "no-cache" }] }.
+     */
+    requiredHeaders?: string[] | Record<string, (string | { name: string; match?: string | RegExp })[]>;
     devGlobals?: string[];
     serviceWorker?: boolean;
     offline?: boolean;
@@ -116,6 +120,25 @@ export interface HarnessConfig {
     ready?: (page: Page) => Promise<void>;
     persist?: (page: Page) => Promise<unknown>;
     verify?: (page: Page, token: unknown) => Promise<void>;
+    /** Node side: after coming back online, anything the app does on reconnect. */
+    reconnect?: (page: Page) => Promise<void>;
+    /**
+     * The update phase (false skips it). The second version is the build with only its service
+     * worker script's bytes changed, unless `build(outDir)` makes a real one.
+     */
+    update?:
+      | false
+      | {
+          sw?: string;
+          mode?: "prompt" | "auto";
+          /** Resolves once the app's update prompt is visible. */
+          prompt?: (page: Page) => Promise<unknown>;
+          /** Accepts it (e.g. clicks Reload). */
+          accept?: (page: Page) => Promise<unknown>;
+          /** Optional: dismisses it; the prompt must return after a reload. */
+          dismiss?: (page: Page) => Promise<unknown>;
+          build?: (outDir: string) => Promise<void>;
+        };
   };
   e2e?: {
     config?: string;

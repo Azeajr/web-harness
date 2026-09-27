@@ -134,13 +134,8 @@ export async function resolveAsset(dir, pathname) {
   return (await isFile(shell)) ? { file: shell, status: 200 } : null;
 }
 
-export async function createStaticServer({
-  dir,
-  port,
-  host = "127.0.0.1",
-  identity = null,
-  unservedPrefixes = [],
-}) {
+// A build directory the server can serve: an index.html, no _redirects, and its _headers rules.
+async function loadSite(dir) {
   const root = path.resolve(dir);
   if (!(await isFile(path.join(root, "index.html"))))
     throw new Error(`${root} has no index.html; build the app first.`);
@@ -152,6 +147,18 @@ export async function createStaticServer({
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+  return { root, rules };
+}
+
+export async function createStaticServer({
+  dir,
+  port,
+  host = "127.0.0.1",
+  identity = null,
+  unservedPrefixes = [],
+}) {
+  // `swap` publishes another build on the same origin, as a deploy does: the smoke's update phase.
+  let { root, rules } = await loadSite(dir);
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, `http://${host}`);
@@ -198,7 +205,12 @@ export async function createStaticServer({
   return {
     server,
     url: `http://${host}:${address.port}`,
-    rules,
+    get rules() {
+      return rules;
+    },
+    async swap(next) {
+      ({ root, rules } = await loadSite(next));
+    },
     close: () =>
       new Promise((resolve) => {
         server.close(() => resolve());
