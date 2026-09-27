@@ -5,7 +5,8 @@ description: >
   counts as a pass by accident, and a prose-only change still reports a verdict.
 inputs:
   needs:
-    description: '`${{ toJSON(needs) }}` from the calling job.'
+    # No expression braces in descriptions: the runner evaluates them even here.
+    description: The calling job's needs context, serialized with toJSON(needs).
     required: true
   code:
     description: 'The scope job''s `code` output.'

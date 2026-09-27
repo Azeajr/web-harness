@@ -1,6 +1,6 @@
 {
   "name": "@azeajr/web-harness",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared development and verification harness for offline-first Vite PWAs: agent browser sessions, one fault policy for exploration and tests, production smoke, container E2E, and CI gates.",
   "license": "MIT",
   "type": "module",
@@ -34,8 +34,7 @@
     "bin",
     "src",
     "types",
-    "docs",
-    "examples"
+    "docs"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
