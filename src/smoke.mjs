@@ -1,5 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { directoryDigest } from "./core.mjs";
@@ -13,16 +14,77 @@ import { watchContext } from "./watch.mjs";
 //
 // The production proof every deploy waits for. Against the built bytes, served the way the host
 // serves them, in a fresh Chromium profile:
-//   1. headers   every header the project requires is sent for /
+//   1. headers   every required header (and value) on every named path
 //   2. bundle    the HTML is a production build (no Vite client, no /src/ module entry)
 //   3. globals   no development accessor leaked into the bundle
 //   4. sw        a service worker registers, and controls the page after one reload
 //   5. persist   a visible action the project names survives a reload
 //   6. offline   with the network cut, a reload renders the shell and the persisted data
-//   7. faults    nothing above produced a page error, failed request, HTTP error or external call
+//   7. online    back online, a reload still renders it and nothing fails on reconnect
+//   8. update    a new version is detected, waits for consent, activates when accepted, keeps the
+//                user's data and does not reload in a loop
+//   9. faults    nothing above produced a page error, failed request, HTTP error or external call
 //
 // Proof boundary: Chromium only, a local static server, no Pages Functions, no real device. It
-// establishes that THIS artifact installs and works offline, not that the edge or iOS does.
+// establishes that THIS artifact installs, works offline and updates, not that the edge or iOS
+// does. The update phase's second version differs from the artifact only in the service-worker
+// script's bytes: it proves the update lifecycle, not the fetching of changed assets.
+
+// Normalized header rules: { path: [{ name, match }] }. The array form names headers on / only.
+export function headerRules(required) {
+  const entries = Array.isArray(required) || !required ? [["/", required ?? []]] : Object.entries(required);
+  return entries.map(([pathname, rules]) => ({
+    pathname,
+    rules: rules.map((rule) => {
+      const name = (typeof rule === "string" ? rule : rule.name)?.toLowerCase();
+      if (!name) throw new Error(`smoke.requiredHeaders for ${pathname}: each rule is a name or { name, match }.`);
+      const match = typeof rule === "string" || !rule.match ? null : new RegExp(rule.match);
+      return { name, match };
+    }),
+  }));
+}
+
+// A pattern path (/assets/*) is checked on the first file the build has under it.
+export async function resolveHeaderPath(dist, pathname) {
+  if (!pathname.includes("*")) return pathname;
+  const directory = pathname.slice(0, pathname.indexOf("*"));
+  const entries = await readdir(path.join(dist, directory), { withFileTypes: true }).catch(() => []);
+  const file = entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort()[0];
+  return file ? `${directory}${file}` : null;
+}
+
+export function headerProblems(pathname, headers, rules) {
+  const problems = [];
+  for (const rule of rules) {
+    const value = headers.get(rule.name);
+    if (value === null) problems.push(`${pathname}: missing ${rule.name}`);
+    else if (rule.match && !rule.match.test(value))
+      problems.push(`${pathname}: ${rule.name} "${value.slice(0, 200)}" does not match /${rule.match.source}/`);
+  }
+  return problems;
+}
+
+// Node-side poll: a waitForFunction with an async predicate is satisfied by the Promise itself.
+async function poll(page, predicate, arg, { timeout, interval = 250 }) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const value = await page.evaluate(predicate, arg).catch(() => null);
+    if (value) return value;
+    if (Date.now() > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+}
+
+const registrationState = async () => {
+  const registration = await navigator.serviceWorker.getRegistration();
+  return {
+    waiting: Boolean(registration?.waiting),
+    installing: Boolean(registration?.installing),
+    controlled: Boolean(navigator.serviceWorker.controller),
+    changed: Boolean(window.__webHarnessControllerChanged),
+  };
+};
+
 export async function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -63,15 +125,28 @@ export async function main(argv) {
   let browser;
   let page;
   let rings = null;
+  let versionB = null;
   try {
+    report.phase = "headers";
     const response = await fetch(`${origin}/`);
     const html = await response.text();
     if (!response.ok) throw new Error(`GET / answered ${response.status}.`);
-    const missing = (smoke.requiredHeaders ?? []).filter(
-      (name) => !response.headers.has(name.toLowerCase()),
-    );
-    if (missing.length) throw new Error(`Missing required headers on /: ${missing.join(", ")}.`);
-    pass("headers", Object.fromEntries(response.headers));
+    const problems = [];
+    const checked = {};
+    for (const { pathname, rules } of headerRules(smoke.requiredHeaders)) {
+      const resolved = await resolveHeaderPath(dist, pathname);
+      if (!resolved) {
+        problems.push(`${pathname}: no file in the build matches`);
+        continue;
+      }
+      const answer = resolved === "/" ? response : await fetch(`${origin}${resolved}`);
+      if (resolved !== "/") await answer.arrayBuffer();
+      problems.push(...headerProblems(resolved, answer.headers, rules));
+      checked[resolved] = Object.fromEntries(rules.map((rule) => [rule.name, answer.headers.get(rule.name)]));
+    }
+    if (problems.length) throw new Error(`Required headers: ${problems.join("; ")}.`);
+    pass("headers", checked);
+    report.phase = "bundle";
     if (/\/@vite\/client|src="\/src\//.test(html))
       throw new Error("index.html references the Vite dev client or /src/ modules.");
     pass("bundle");
@@ -104,7 +179,8 @@ export async function main(argv) {
     if (leaked.length) throw new Error(`Development globals in production: ${leaked.join(", ")}.`);
     pass("globals", devGlobals);
 
-    if (smoke.serviceWorker !== false) {
+    const serviceWorker = smoke.serviceWorker !== false;
+    if (serviceWorker) {
       report.phase = "sw";
       await page.evaluate(
         () =>
@@ -123,6 +199,9 @@ export async function main(argv) {
     }
 
     let token = null;
+    const verify = async () => {
+      if (smoke.persist && smoke.verify) await smoke.verify(page, token);
+    };
     if (smoke.persist) {
       report.phase = "persist";
       token = (await smoke.persist(page)) ?? null;
@@ -132,14 +211,114 @@ export async function main(argv) {
       pass("persist", token);
     }
 
-    if (smoke.offline !== false && smoke.serviceWorker !== false) {
+    if (smoke.offline !== false && serviceWorker) {
       report.phase = "offline";
       await context.setOffline(true);
       await page.reload({ waitUntil: "domcontentloaded" });
       await ready();
-      if (smoke.persist && smoke.verify) await smoke.verify(page, token);
+      await verify();
       await context.setOffline(false);
       pass("offline");
+
+      // Back online: the same page, reloaded, must still work, and reconnecting must not fail.
+      report.phase = "online";
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await ready();
+      await verify();
+      if (smoke.reconnect) await smoke.reconnect(page);
+      pass("online");
+    }
+
+    const update = smoke.update === false ? null : { sw: "sw.js", mode: "prompt", ...smoke.update };
+    if (update && serviceWorker) {
+      report.phase = "update";
+      if (!["prompt", "auto"].includes(update.mode)) throw new Error('smoke.update.mode is "prompt" or "auto".');
+      const detail = { mode: update.mode };
+      // Version B: the artifact with only the service-worker script's bytes changed, or a real
+      // second build when the project provides one.
+      versionB = await mkdtemp(path.join(tmpdir(), "wh-smoke-update-"));
+      if (update.build) await update.build(versionB);
+      else {
+        await cp(dist, versionB, { recursive: true });
+        const script = path.join(versionB, update.sw);
+        await readFile(script).catch(() => {
+          throw new Error(`No ${update.sw} in the build; set smoke.update.sw, or smoke.update: false.`);
+        });
+        await appendFile(script, `\n// web-harness update probe ${Date.now()}\n`);
+      }
+      await page.evaluate(() => {
+        window.__webHarnessControllerChanged = false;
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          window.__webHarnessControllerChanged = true;
+        });
+      });
+      await served.swap(versionB);
+      await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update());
+      if (update.mode === "prompt") {
+        const found = await poll(page, async () => {
+          const registration = await navigator.serviceWorker.getRegistration();
+          if (window.__webHarnessControllerChanged) return "changed";
+          return registration?.waiting ? "waiting" : null;
+        }, null, { timeout: 30_000 });
+        if (found === "changed") throw new Error("The new version activated without consent (prompt mode).");
+        if (!found) throw new Error("No waiting service worker 30s after the new version was published.");
+        detail.detected = true;
+        // A keeps working while B waits, and B does not take over on its own.
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        const waiting = await page.evaluate(registrationState);
+        if (waiting.changed || !waiting.waiting)
+          throw new Error("The new version activated without consent (prompt mode).");
+        await verify();
+        detail.consent = true;
+        if (!update.prompt || !update.accept) {
+          detail.activation = "not exercised: set smoke.update.prompt and smoke.update.accept";
+          report.warnings.push(`update: ${detail.activation}`);
+          pass("update", detail);
+        } else {
+          await update.prompt(page);
+          if (update.dismiss) {
+            await update.dismiss(page);
+            await page.reload({ waitUntil: "domcontentloaded" });
+            await ready();
+            await update.prompt(page);
+            detail.dismissed = "prompt returned after a reload";
+          }
+          let navigations = 0;
+          const count = (frame) => {
+            if (frame === page.mainFrame()) navigations++;
+          };
+          page.on("framenavigated", count);
+          await update.accept(page);
+          const activated = await poll(page, async () => {
+            const registration = await navigator.serviceWorker.getRegistration();
+            return Boolean(navigator.serviceWorker.controller && registration?.active && !registration.waiting);
+          }, null, { timeout: 30_000 });
+          if (!activated) throw new Error("Accepting the update did not activate the new version within 30s.");
+          await page.waitForLoadState("domcontentloaded");
+          await ready();
+          const settledAt = navigations;
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+          page.off("framenavigated", count);
+          if (navigations - settledAt > 1) throw new Error(`Reload loop: ${navigations} navigations after accepting the update.`);
+          const probed = await page.evaluate(
+            async (script) => (await (await fetch(`/${script}`, { cache: "no-store" })).text()).includes("web-harness update probe"),
+            update.sw,
+          );
+          if (!update.build && !probed) throw new Error("The page is not being served the new version after activation.");
+          await verify();
+          detail.activated = true;
+          detail.navigations = navigations;
+          pass("update", detail);
+        }
+      } else {
+        const changed = await poll(page, () => window.__webHarnessControllerChanged, null, { timeout: 30_000 });
+        if (!changed) throw new Error("The new version did not take over within 30s (auto mode).");
+        await page.waitForLoadState("domcontentloaded");
+        await ready();
+        await verify();
+        detail.activated = true;
+        pass("update", detail);
+      }
     }
 
     report.phase = "faults";
@@ -180,6 +359,7 @@ export async function main(argv) {
   } finally {
     await browser?.close().catch(() => {});
     await served.close();
+    if (versionB) await rm(versionB, { recursive: true, force: true });
     report.finishedAt = new Date().toISOString();
     await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
   }
@@ -188,4 +368,3 @@ export async function main(argv) {
   if (!report.ok) process.exitCode = 1;
   return report;
 }
-

@@ -7,7 +7,8 @@ Shared development and verification harness for offline-first Vite PWAs on Cloud
   JSON; `restart` on the same profile to prove durability.
 - **One fault policy** for exploration and for the Playwright suite (`createHarnessTest`).
 - **Production proof** — a Pages-style static server (`_headers` applied, SPA fallback) and a smoke
-  that checks headers, bundle, service worker, persistence and offline reload.
+  that checks header values, bundle, service worker, persistence, offline and online reloads, and
+  the update of an installed client to a new version.
 - **Gates** — container E2E with canonical pixel baselines, mutation testing in a throwaway copy,
   an executable scenario inventory, and GitHub composite actions (`setup`, `scope`, `verdict`) for
   an always-reporting required check and deploys that ship the tested artifact.
