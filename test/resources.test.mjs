@@ -112,8 +112,15 @@ test("e2e passes every argument it does not own through to Playwright", () => {
     updateSnapshots: true,
     forceResources: true,
     prebuilt: "dist",
+    timezone: null,
+    locale: null,
     playwrightArgs: ["-j", "2"],
   });
+  const zoned = e2eArguments(["--timezone", "Pacific/Kiritimati", "--grep", "day", "--locale", "en-GB"]);
+  assert.equal(zoned.timezone, "Pacific/Kiritimati");
+  assert.equal(zoned.locale, "en-GB");
+  assert.deepEqual(zoned.playwrightArgs, ["--grep", "day"]);
+  assert.throws(() => e2eArguments(["--timezone"]), /--timezone needs a value/);
   assert.throws(() => e2eArguments(["--prebuilt"]), /needs a directory/);
   assert.throws(() => e2eArguments(["--prebuilt", "--grep"]), /needs a directory/);
 });

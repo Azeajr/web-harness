@@ -11,6 +11,8 @@ export default defineHarness({
   name: "example",
   port: 4191,
   defaults: { browser: "chromium", device: "Desktop Chrome" },
+  // Sessions and the Playwright suite run here unless --timezone/--locale/--clock/--now say otherwise.
+  environment: { timezoneId: "UTC", locale: "en-US" },
   dev: {
     command: (port) => ["npx", "--no-install", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
     marker: "/src/main.js",

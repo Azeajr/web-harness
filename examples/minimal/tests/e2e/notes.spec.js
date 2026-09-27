@@ -16,7 +16,7 @@ test("saves a note that survives a reload", async ({ page }) => {
 test("an induced failure is expected, not ignored", async ({ page, expectPageFault }) => {
   expectPageFault("console.error", /induced failure/);
   expectPageFault("http", /missing\.json/);
-  const missing = page.waitForResponse("**/missing.json");
+  const missing = page.waitForResponse(/missing\.json/);
   await page.getByRole("button", { name: "Break" }).click();
   await missing;
 });

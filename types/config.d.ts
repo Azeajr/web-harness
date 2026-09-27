@@ -34,6 +34,8 @@ export interface EvidenceConfig {
   /** Ring sizes for every request and console line kept on a browser context. */
   requestCap?: number;
   consoleCap?: number;
+  /** Traces carry request/response bodies and headers: upload them from CI only when true. */
+  uploadTraces?: boolean;
 }
 
 export interface Fixture {
@@ -78,6 +80,14 @@ export interface HarnessConfig {
     cwd?: string;
     /** Text only a dev server's HTML contains (the module entry path). */
     marker?: string;
+    /**
+     * Extra environment variables the dev server may see (exact names, or prefixes ending in *).
+     * Everything else outside a small tool allowlist is withheld; secret-looking names pass only
+     * when named exactly.
+     */
+    env?: string[];
+    /** "isolated" (default): HOME and XDG dirs live in the session. "real": the developer's. */
+    home?: "isolated" | "real";
   };
   production?: {
     /** argv that builds the production bundle into outDir. */
@@ -105,6 +115,14 @@ export interface HarnessConfig {
   durable?: { read: (page: Page) => Promise<unknown> };
   faults?: FaultConfig;
   evidence?: EvidenceConfig;
+  /** Browser environment for sessions and harnessPlaywright; start --timezone/--locale/--clock/--now override it. */
+  environment?: {
+    timezoneId?: string;
+    locale?: string;
+    /** real (default); fixed: Date frozen at `now`, timers run; install: fully controlled clock. */
+    clock?: "real" | "fixed" | "install";
+    now?: string;
+  };
   smoke?: {
     dist?: string;
     /**

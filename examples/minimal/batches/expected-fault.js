@@ -4,7 +4,7 @@ async (page, { step, expectFault }) => {
   expectFault("console.error", /induced failure/);
   expectFault("http", /missing\.json/);
   await step("press Break", async () => {
-    const missing = page.waitForResponse("**/missing.json");
+    const missing = page.waitForResponse(/missing\.json/);
     await page.getByRole("button", { name: "Break" }).click();
     await missing;
   });

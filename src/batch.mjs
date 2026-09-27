@@ -1,5 +1,6 @@
 import { Script } from "node:vm";
 import { checkExpectation, diffValues, readWatched, settle, stableObservation } from "./effect.mjs";
+import { clockHelper } from "./clock.mjs";
 import { captureStorage, sliceRing } from "./evidence.mjs";
 import { failures, unmetExpectations } from "./faults.mjs";
 import { observe, readState } from "./inspect.mjs";
@@ -9,13 +10,21 @@ import { observe, readState } from "./inspect.mjs";
 // sections, defaults, target and read. `policy` is the fault policy as JSON. `durable` is the
 // adapter's durable.read source (or "null"). `trace` is off, retain-on-failure or keep.
 //
-// The batch receives { step, assert, observe, state, effect, allowFault, expectFault }. On failure
+// The batch receives { step, assert, observe, state, effect, allowFault, expectFault, clock }. `clock`
+// drives the page clock and needs environment.clock "install" (or "fixed" for setFixedTime). On failure
 // it keeps a bundle under `${artifactBase}/bundle/`: the screenshot here, and the rest (network,
 // console, accessibility tree, storage, state) returned for the controller to write.
 export function batchSource(
   source,
   artifactBase,
-  { stateSpec = "{ sections: [], defaults: [] }", policy, durable = "null", trace = "off", batchId = "batch" } = {},
+  {
+    stateSpec = "{ sections: [], defaults: [] }",
+    policy,
+    durable = "null",
+    trace = "off",
+    batchId = "batch",
+    clockMode = "real",
+  } = {},
 ) {
   const expression = source.trim().replace(/;$/, "");
   new Script(`(${expression})`); // Reject malformed input before browser interactions.
@@ -36,6 +45,7 @@ export function batchSource(
     const durable = ${durable};
     const traceMode = ${JSON.stringify(trace)};
     const batchId = ${JSON.stringify(batchId)};
+    const clockMode = ${JSON.stringify(clockMode)};
     const base = ${JSON.stringify(artifactBase)};
     const context = page.context();
     const evidence = context.__webHarnessEvidence ?? null;
@@ -86,6 +96,8 @@ export function batchSource(
       if (problem) throw new Error(problem);
       return value;
     };
+    const clock = (${clockHelper.toString()})(page, clockMode);
+    let clockResumed = false;
     let tracing = false;
     if (traceMode !== 'off') {
       try { await context.tracing.start({ screenshots: true, snapshots: true, title: batchId }); tracing = true; }
@@ -93,11 +105,16 @@ export function batchSource(
     }
     let result = null, error = null, unmet = [];
     try {
-      result = await (${expression})(page, {
-        observe: (target, options) => observe(page, target, options),
-        state: sections => readState(page, sections, stateSpec),
-        step, assert, effect, allowFault, expectFault,
-      }) ?? null;
+      try {
+        result = await (${expression})(page, {
+          observe: (target, options) => observe(page, target, options),
+          state: sections => readState(page, sections, stateSpec),
+          step, assert, effect, allowFault, expectFault, clock,
+        }) ?? null;
+      } finally {
+        // A pause lasts for the batch: the CLI's own settling waits on page timers.
+        clockResumed = await clock.release().catch(() => false);
+      }
       // Require serializable results while still inside the evidence-capture boundary.
       JSON.stringify(result);
       // Faults trail their cause: the browser's "Failed to load resource" line, a response body
@@ -142,7 +159,7 @@ export function batchSource(
     // Judged again here: a batch that threw early never reached the check above.
     const own = records().slice(faultMark);
     const missing = unmetExpectations(own, expected);
-    return { ok: error === null, result: error === null ? result : null, error, steps, effects,
+    return { ok: error === null, result: error === null ? result : null, error, steps, effects, clockResumed,
       executionMs: Date.now() - started, artifacts, artifactErrors,
       expectedFaults: expected.map((item) => ({ ...item, met: !missing.includes(item),
         matched: own.filter((record) => (!item.kind || record.kind === item.kind) && new RegExp(item.pattern).test(record.detail)).length })),

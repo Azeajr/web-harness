@@ -2,7 +2,7 @@
 // throws, but the retained faults fail it, with a screenshot and state kept as evidence.
 async (page, { step }) => {
   await step("press Break", async () => {
-    const missing = page.waitForResponse("**/missing.json");
+    const missing = page.waitForResponse(/missing\.json/);
     await page.getByRole("button", { name: "Break" }).click();
     await missing;
   });

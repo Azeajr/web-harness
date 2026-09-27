@@ -1,10 +1,19 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { createHash } from "node:crypto";
 import { slug } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
+import { sourceIdentity } from "./provenance.mjs";
+import { STATUS } from "./status.mjs";
 
 // web-harness scenarios [--results playwright-results.json] [--output FILE] [--allow-flaky]
+//                       [--lane NAME=REPORT.json]... [--build-digest SHA]
+//
+// The report names the source it judged (commit and a digest of uncommitted work), the results
+// file (by digest) and the build. A lane cover ({ lane: 'smoke' }) is held by the CI verdict unless
+// its report is given with --lane: then that report must have passed, on the same build as the
+// E2E results when both record one.
 //
 // The executable scenario inventory. Each critical journey the project names in
 // harness.config.mjs must either map to conventional tests that exist (and, given a Playwright
@@ -89,18 +98,52 @@ export async function main(argv) {
       results: { type: "string" },
       output: { type: "string", default: ".web-harness/scenarios.json" },
       "allow-flaky": { type: "boolean", default: false },
+      lane: { type: "string", multiple: true, default: [] },
+      "build-digest": { type: "string" },
     },
     strict: true,
   });
   const config = await loadConfig();
   const scenarios = validateScenarios(config.scenarios);
   let rows = null;
+  let results_ = null;
+  const problems = [];
+  const builds = new Map(); // where each build digest came from
+  if (values["build-digest"]) builds.set("--build-digest", values["build-digest"]);
   if (values.results) {
-    const report = JSON.parse(await readFile(path.resolve(config.root, values.results), "utf8"));
+    const text = await readFile(path.resolve(config.root, values.results), "utf8");
+    const report = JSON.parse(text);
     const testDir = path.relative(config.root, report.config?.rootDir ?? config.root);
     rows = flattenResults(report, testDir);
+    results_ = {
+      path: values.results,
+      digest: createHash("sha256").update(text).digest("hex"),
+      playwright: report.config?.version ?? null,
+      startTime: report.stats?.startTime ?? null,
+      buildDigest: report.webHarness?.buildDigest ?? null,
+    };
+    if (results_.buildDigest) builds.set("e2e results", results_.buildDigest);
   }
-  const problems = [];
+  const lanes = new Map();
+  for (const entry of values.lane) {
+    const [name, file] = entry.split("=");
+    if (!name || !file) throw new Error("--lane takes NAME=REPORT.json.");
+    let report = null;
+    try {
+      report = JSON.parse(await readFile(path.resolve(config.root, file), "utf8"));
+    } catch {
+      problems.push(`lane ${name}: no report at ${file}.`);
+    }
+    const passed = Boolean(report && (report.status === STATUS.passed || (report.status === undefined && report.ok === true)));
+    if (report && !passed) problems.push(`lane ${name}: ${file} did not pass (${report.error ?? report.status}).`);
+    if (report?.digest) builds.set(`lane ${name}`, report.digest);
+    lanes.set(name, { file, passed, digest: report?.digest ?? null });
+  }
+  const distinctBuilds = new Set(builds.values());
+  if (distinctBuilds.size > 1)
+    problems.push(
+      `Evidence is about different builds: ${[...builds].map(([from, sha]) => `${from} ${sha.slice(0, 12)}`).join(", ")}.`,
+    );
   const results = [];
   for (const scenario of scenarios) {
     if (scenario.status) {
@@ -109,9 +152,16 @@ export async function main(argv) {
     }
     const covered = [];
     let flaky = false;
+    let laneHeldByVerdict = false;
     for (const cover of scenario.covers) {
       if (cover.lane) {
-        covered.push(cover); // proven by a required CI lane; the verdict job holds it to that
+        const lane = lanes.get(cover.lane);
+        if (lane) covered.push({ ...cover, report: lane.file, passed: lane.passed, buildDigest: lane.digest });
+        else {
+          // Not checked here: a required CI lane, held to success by the verdict job.
+          laneHeldByVerdict = true;
+          covered.push({ ...cover, heldBy: "verdict" });
+        }
         continue;
       }
       const file = path.resolve(config.root, cover.file);
@@ -151,12 +201,35 @@ export async function main(argv) {
         });
       } else covered.push(cover);
     }
-    results.push({ id: scenario.id, status: rows ? (flaky ? "flaky" : "verified") : "mapped", covers: covered });
+    const tested = covered.some((cover) => cover.outcomes);
+    const status = !rows
+      ? "mapped"
+      : flaky
+        ? STATUS.flaky
+        : !laneHeldByVerdict
+          ? "verified"
+          : tested
+            ? "verified-with-lane"
+            : "held-by-verdict";
+    results.push({ id: scenario.id, status, covers: covered });
   }
   await mkdir(path.dirname(path.resolve(config.root, values.output)), { recursive: true });
   await writeFile(
     path.resolve(config.root, values.output),
-    JSON.stringify({ project: config.name, allowFlaky: values["allow-flaky"], results, problems }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        project: config.name,
+        status: problems.length ? STATUS.failed : STATUS.passed,
+        source: await sourceIdentity(config.root),
+        results: results_,
+        build: distinctBuilds.size === 1 ? { digest: [...distinctBuilds][0], from: [...builds.keys()] } : null,
+        allowFlaky: values["allow-flaky"],
+        scenarios: results,
+        problems,
+      },
+      null,
+      2,
+    ) + "\n",
   );
   for (const result of results)
     console.log(`${result.status.padEnd(12)}${result.id}${result.reason ? ` — ${result.reason}` : ""}`);

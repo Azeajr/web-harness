@@ -24,6 +24,7 @@ export const commands = [
   "state",
   "run",
   "effect",
+  "reconcile",
 ];
 const baseValueOptions = [
   "session",
@@ -38,8 +39,13 @@ const baseValueOptions = [
   "output",
   "port",
   "trace",
+  "timezone",
+  "locale",
+  "now",
+  "clock",
+  "scenario",
 ];
-const flagOptions = new Set(["help", "full-page", "hires", "force-resources"]);
+const flagOptions = new Set(["help", "full-page", "hires", "force-resources", "after-unknown"]);
 
 export const TRACE_MODES = ["off", "retain-on-failure", "keep"];
 

@@ -1,4 +1,4 @@
-import { evidenceConfig } from "./config.mjs";
+import { environmentConfig, evidenceConfig } from "./config.mjs";
 import { toJsonl } from "./evidence.mjs";
 import { failures, faultPolicy, unmetExpectations } from "./faults.mjs";
 import { watchContext } from "./watch.mjs";
@@ -91,6 +91,12 @@ export function createHarnessTest(base, harness = {}) {
 //   export default defineConfig({ ...harnessPlaywright(harness), testDir: 'tests/e2e', webServer })
 export function harnessPlaywright(harness = {}, overrides = {}) {
   const ci = Boolean(process.env.CI);
+  // The harness environment's timezone and locale; `web-harness e2e --timezone/--locale` (through
+  // WEB_HARNESS_TIMEZONE/LOCALE) runs the same suite in another one.
+  const environment = environmentConfig(harness.environment, {
+    timezoneId: process.env.WEB_HARNESS_TIMEZONE || undefined,
+    locale: process.env.WEB_HARNESS_LOCALE || undefined,
+  });
   return {
     forbidOnly: ci,
     retries: ci ? 1 : 0,
@@ -98,6 +104,8 @@ export function harnessPlaywright(harness = {}, overrides = {}) {
     reporter: [["list"], ["html", { open: "never" }]],
     ...overrides,
     use: {
+      ...(environment.timezoneId ? { timezoneId: environment.timezoneId } : {}),
+      ...(environment.locale ? { locale: environment.locale } : {}),
       trace: "retain-on-failure",
       screenshot: "only-on-failure",
       video: "retain-on-failure",

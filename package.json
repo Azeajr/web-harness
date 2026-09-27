@@ -34,7 +34,8 @@
     "bin",
     "src",
     "types",
-    "docs"
+    "docs",
+    "schemas"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",

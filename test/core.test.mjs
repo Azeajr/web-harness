@@ -350,6 +350,59 @@ test("a batch excuses and requires only its own faults, and marks what it excuse
   assert.match(late.error, /early/);
 });
 
+test("a batch drives an installed clock, and says why when the session's clock is not installed", async () => {
+  const calls = [];
+  const context = { __webHarnessFaults: [] };
+  const page = {
+    context: () => context,
+    url: () => "http://127.0.0.1:1/",
+    screenshot: async () => {},
+    evaluate: async () => 42,
+    waitForTimeout: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    clock: {
+      runFor: async (ms) => calls.push(["runFor", ms]),
+      fastForward: async (ms) => calls.push(["fastForward", ms]),
+      pauseAt: async (time) => calls.push(["pauseAt", time.toISOString()]),
+      resume: async () => calls.push(["resume"]),
+      setFixedTime: async (time) => calls.push(["setFixedTime", time.toISOString()]),
+    },
+  };
+  const read = "{ sections: [], defaults: [], target: 'dev', read: () => null }";
+  const run = (source, clockMode) =>
+    runInNewContext(batchSource(source, "/tmp/evidence", { policy, stateSpec: read, clockMode }))(page);
+  const installed = await run(
+    `async (page, { clock }) => {
+      await clock.runFor(1000);
+      await clock.fastForward('01:00');
+      await clock.pauseAt('2026-03-08T06:59:00Z');
+      await clock.resume();
+      return { mode: clock.mode, now: await clock.now() };
+    }`,
+    "install",
+  );
+  assert.equal(installed.ok, true, installed.error);
+  assert.deepEqual(JSON.parse(JSON.stringify(installed.result)), { mode: "install", now: 42 });
+  assert.deepEqual(calls, [
+    ["runFor", 1000],
+    ["fastForward", "01:00"],
+    ["pauseAt", "2026-03-08T06:59:00.000Z"],
+    ["resume"],
+  ]);
+  assert.equal(installed.clockResumed, false, "the batch resumed its own pause");
+  // A batch that leaves the clock paused gets it resumed when it ends: the Playwright CLI settles
+  // every command on a page timer, which a paused clock never fires.
+  const left = await run("async (page, { clock }) => { await clock.pauseAt('2026-03-08T08:00:00Z'); }", "install");
+  assert.equal(left.ok, true, left.error);
+  assert.equal(left.clockResumed, true);
+  assert.deepEqual(calls.slice(-2), [["pauseAt", "2026-03-08T08:00:00.000Z"], ["resume"]]);
+  const real = await run("async (page, { clock }) => { await clock.runFor(1000); }", "real");
+  assert.equal(real.ok, false);
+  assert.match(real.error, /clock\.runFor needs environment\.clock "install" \(this session: real\)/);
+  const fixed = await run("async (page, { clock }) => { await clock.setFixedTime('2026-11-01T05:59:00Z'); }", "fixed");
+  assert.equal(fixed.ok, true, fixed.error);
+  assert.deepEqual(calls.at(-1), ["setFixedTime", "2026-11-01T05:59:00.000Z"]);
+});
+
 test("a batch waits for its own in-flight requests without timer globals", async () => {
   // runInNewContext, like Playwright CLI run-code, has no setTimeout.
   const request = { seq: 1, url: "http://127.0.0.1:1/slow", ms: null, failure: null };
@@ -364,7 +417,7 @@ test("a batch waits for its own in-flight requests without timer globals", async
     screenshot: async () => {},
     evaluate: async () => true,
     waitForTimeout: async () => {
-      waited++;
+      if (request.ms === null) waited++;
       request.ms = 5;
     },
   };

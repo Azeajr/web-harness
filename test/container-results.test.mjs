@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -129,6 +129,67 @@ test("a scenario whose test passed only on retry is flaky, not verified", async 
     );
     assert.equal(allowed.code, 0, allowed.out);
     assert.match(allowed.out, /flaky\s+save/, "allowed, still reported as flaky");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lane reports and build digests tie the scenario report to one build", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wh-lanes-"));
+  const run = (...args) =>
+    new Promise((resolve) =>
+      execFile(process.execPath, [bin, "scenarios", ...args], { cwd: root }, (error, stdout, stderr) =>
+        resolve({ code: error?.code ?? 0, out: stdout + stderr }),
+      ),
+    );
+  try {
+    await mkdir(path.join(root, "tests/e2e"), { recursive: true });
+    await writeFile(
+      path.join(root, "harness.config.mjs"),
+      `export default { name: "demo", dev: { command: (port) => ["vite", "--port", String(port)] },
+        scenarios: [
+          { id: "save", title: "Save", covers: [{ file: "tests/e2e/a.spec.ts", test: "saves" }] },
+          { id: "offline", title: "Offline", covers: [{ lane: "smoke" }] } ] };`,
+    );
+    await writeFile(path.join(root, "pnpm-lock.yaml"), "");
+    await writeFile(path.join(root, "tests/e2e/a.spec.ts"), "test('saves', () => {})\n");
+    const results = (buildDigest) => ({
+      config: { rootDir: path.join(root, "tests/e2e"), version: "1.63.0" },
+      webHarness: { buildDigest },
+      suites: [{ file: "a.spec.ts", specs: [{ title: "saves", file: "a.spec.ts", tests: [{ projectName: "p", status: "expected" }] }] }],
+    });
+    const a = "a".repeat(64);
+    const b = "b".repeat(64);
+    await writeFile(path.join(root, "results.json"), JSON.stringify(results(a)));
+    await writeFile(path.join(root, "smoke-ok.json"), JSON.stringify({ status: "passed", digest: a }));
+    await writeFile(path.join(root, "smoke-other.json"), JSON.stringify({ status: "passed", digest: b }));
+    await writeFile(path.join(root, "smoke-failed.json"), JSON.stringify({ status: "failed", digest: a, error: "offline" }));
+
+    // Without --lane the lane is held by the CI verdict, and says so.
+    const held = await run("--results", "results.json");
+    assert.equal(held.code, 0, held.out);
+    assert.match(held.out, /held-by-verdict\s*offline/);
+
+    const same = await run("--results", "results.json", "--lane", "smoke=smoke-ok.json");
+    assert.equal(same.code, 0, same.out);
+    assert.match(same.out, /verified\s+offline/);
+    const report = JSON.parse(await readFile(path.join(root, ".web-harness/scenarios.json"), "utf8"));
+    assert.equal(report.status, "passed");
+    assert.equal(report.build.digest, a);
+    assert.match(report.results.digest, /^[0-9a-f]{64}$/);
+    assert.equal(report.results.playwright, "1.63.0");
+
+    const other = await run("--results", "results.json", "--lane", "smoke=smoke-other.json");
+    assert.equal(other.code, 1);
+    assert.match(other.out, /different builds: e2e results aaaaaaaaaaaa, lane smoke bbbbbbbbbbbb/);
+
+    const failed = await run("--results", "results.json", "--lane", "smoke=smoke-failed.json");
+    assert.equal(failed.code, 1);
+    assert.match(failed.out, /lane smoke: smoke-failed\.json did not pass \(offline\)/);
+
+    const missing = await run("--results", "results.json", "--lane", "smoke=nowhere.json");
+    assert.equal(missing.code, 1);
+    assert.match(missing.out, /lane smoke: no report at nowhere\.json/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

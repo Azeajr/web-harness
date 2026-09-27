@@ -23,13 +23,6 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 
 | ID | Item | Size | Milestone |
 |---|---|---|---|
-| [P1](#p1-clock-timezone-and-locale) | Clock, timezone and locale | M | M3 |
-| [P2](#p2-run-manifest-v3) | Run manifest v3 | M | M3 |
-| [P3](#p3-one-status-vocabulary) | One status vocabulary | S | M3 |
-| [P4](#p4-scenario-report-tied-to-revision-and-build) | Scenario report tied to revision and build | S | M3 |
-| [P5](#p5-reconcile-after-an-unknown-outcome) | Reconcile after an unknown outcome | S | M3 |
-| [P6](#p6-redaction) | Redaction | S | M3 |
-| [H2](#h2-isolate-the-host-servers-environment) | Isolate the host server's environment | S | M3 |
 | [A2](#a2-agent-skill-shipped-with-the-package) | Agent skill shipped with the package | S | M4 |
 | [A3](#a3-promote-a-batch-into-a-test) | Promote a batch into a test | M | M4 |
 | [A4](#a4-accessibility-scan) | Accessibility scan | M | M4 |
@@ -47,293 +40,11 @@ every `uses:` reference together (README, "Released by tag").
   scenarios (E3), batch-local fault expectations (E4) and the shared Playwright preset (A1).
 - **M2 — Offline-first proof** shipped: the smoke's update phase (O1), the online phase and
   header value rules (O2).
-- **M3 — Determinism and provenance.** Make every run reproducible and attributable: environment
-  pinned, manifest complete, one status vocabulary, scenario results tied to the build, no blind
-  replays, nothing sensitive in evidence, the host server isolated.
+- **M3 — Determinism and provenance** shipped: clock, timezone and locale (P1), run manifest v3
+  (P2), one status vocabulary (P3), scenario reports tied to source and build (P4), reconcile after
+  an unknown outcome (P5), redaction (P6) and the host server's isolated environment (H2).
 - **M4 — Agent ergonomics.** Ship the skill, close the promote-to-test step, add accessibility.
 - **M5 — Extended tier and measurement.** Scheduled coverage and harness performance baselines.
-
----
-
-## M3 — Determinism and provenance
-
-### P1. Clock, timezone and locale
-
-**Why.**
-- Design review section D: "Fix clock/locale/timezone … also run targeted timezone/DST variants
-  where the product depends on local dates."
-- Section C: the manifest records "clock, timezone, locale".
-- Several consumers are date-driven: training-log (sessions, cycles), chorequest (daily quests,
-  day rollover), tabletop (session history).
-
-**Today.**
-- Nothing in web-harness: there is no config field (`types/config.d.ts:54-111`), no controller
-  option, and nothing in the manifest.
-- chorequest does it itself:
-  - `page.clock.setFixedTime` inside its fixture's `apply` (`chorequest/harness.config.mjs:19`),
-    which is lost after `restart` (its own comment at `:17`);
-  - `timezoneId: 'UTC', locale: 'en-US'` in its Playwright config
-    (`chorequest/playwright.config.ts:19-20`);
-  - its `ROADMAP.md:270` notes that UTC-only runs make the browser suite blind to local-day bugs.
-    Its unit tests do run off-UTC in CI (America/New_York and Pacific/Kiritimati lanes).
-- The other three pin nothing.
-
-**Design.**
-- **Config:**
-  ```js
-  environment: {
-    timezoneId: 'America/New_York',
-    locale: 'en-US',
-    clock: 'real' | 'fixed' | 'install',   // default 'real'
-    now: '2026-03-08T06:30:00Z',           // required for fixed/install
-  }
-  ```
-  - `fixed`: `page.clock.setFixedTime(now)`. `Date` is frozen and timers still run, which is what
-    chorequest uses.
-  - `install`: `page.clock.install({ time: now })`. Timers are controlled, and batches get a
-    `clock` helper (`runFor`, `fastForward`, `pauseAt`, `resume`) for rest timers (training-log)
-    and day rollover (chorequest).
-- **Controller.**
-  - `timezoneId` and `locale` go through the Playwright CLI's `open --config` file. The controller
-    writes it into the session directory; `--config` is already refused as a user `cli` argument at
-    `src/controller.mjs:1056`, which stays.
-  - The clock is applied in `openBrowser()` (`src/controller.mjs:677-699`), before the fixture. So
-    `restart` re-applies it, which fixes the pin chorequest loses today.
-  - `restart` keeps the same `now` under `fixed`. It is documented that "restart" with a frozen
-    clock means the same instant.
-- **Overrides:** `start --timezone Pacific/Kiritimati --locale en-GB --now 2026-11-01T05:59:00Z
-  --clock install`. Overrides are part of the seed digest, so `reset` refuses a changed environment
-  like a changed fixture.
-- **Playwright:** A1 reads the same config. `WEB_HARNESS_TIMEZONE` and `WEB_HARNESS_LOCALE`
-  override it, and `web-harness e2e --timezone X` passes them into the container (next to the
-  existing `-e` list, `src/container.mjs:256-269`), so the whole suite can run in another zone.
-- **Recommended variants** (documented, and run by G2): US spring-forward (2026-03-08 02:00 local),
-  US fall-back (2026-11-01 02:00 local), Pacific/Kiritimati (UTC+14, the date line), and
-  Pacific/Pago_Pago (UTC−11).
-- **Manifest:** records the effective environment (P2), read back from the page
-  (`Intl.DateTimeFormat().resolvedOptions().timeZone`, `navigator.language`, `Date.now()`), not
-  the requested one.
-
-**Acceptance.**
-- A session started with `--timezone Pacific/Kiritimati` reports that zone from the page, and so
-  does the manifest.
-- `restart` keeps the zone and the clock.
-- `e2e --timezone` changes `resolvedOptions().timeZone` inside tests.
-- chorequest can delete its own `setFixedTime` from `apply` and keep passing.
-
-**Open question (verify first).** Whether the Playwright CLI's config file accepts context options
-such as `timezoneId` and `locale` (the CLI's `open` help lists `--config` but not its schema). If
-it does not, there is no cheap fallback: a live context's timezone cannot be changed from
-`run-code`, so the controller would have to launch the browser itself instead of through the CLI's
-`open`. That is a larger change; decide before building. The clock part (`page.clock`) works either
-way and can ship first.
-
-### P2. Run manifest v3
-
-**Why.** Design review section C lists the fields a run manifest must carry so that any artifact
-can be attributed to exact code, build, environment and resources.
-
-**Today.** `session.json` is schema 2 (`src/controller.mjs:877,886-903`), copied to the run's
-`manifest.json` once the seed is applied (`src/controller.mjs:749-752`).
-
-- **It has:** project, root, session, token, target, image and imageId, browser, device and the
-  device descriptor (viewport and DPR), seed (fixture, digest, URL, options, setup), workflow,
-  status, server process identity, container ID, profile directory, retained faults, runId, runDir,
-  build `{ outDir, digest }` (production only), postconditions, and `source: { commit, worktree }`,
-  where `worktree` is `git status --short` text (`src/controller.mjs:743-746`).
-- **Missing against the review:**
-  - `attemptId` and `scenarioId`;
-  - a digest of uncommitted changes (the status text shows which files changed, not what they
-    contain);
-  - the Playwright and Node versions (printed by `preflight` at `src/controller.mjs:449-451` but
-    not stored);
-  - resource limits (constants at `src/controller.mjs:67-70`, not stored);
-  - clock, timezone and locale;
-  - timings for `start`, `restart` and `reset`;
-  - the cleanup outcome (only in `events.jsonl`);
-  - an artifact index;
-  - truncation flags.
-
-**Design.**
-- Schema 3, published as `schemas/run-manifest.v3.json` (added to `files` in `package.json`):
-  ```text
-  schemaVersion: 3, runId, sessionId, project, target, workflow
-  source:      { commit, branch, dirty, dirtyDigest }
-  build:       { digest, outDir } | null
-  fixture:     { name, digest }   setup: { path, digest } | null
-  environment: { timezoneId, locale, clock, now }            (P1, as read from the page)
-  browser:     { name, device, viewport, dpr, userAgent }
-  image:       { ref, id }        driver: { playwright, node }
-  limits:      { containerMemory, containerCpus, serverHeapMb, forcedResources }   (H1)
-  identities:  { origin, server: { pid, start }, containerId, profileDir }
-  state:       starting | ready | restarting | resetting | stopped      (session lifecycle)
-  status:      P3 vocabulary                                            (outcome)
-  timings:     { preflight, build, serverReady, container, open, fixture, total }
-  attempts:    [{ batchId, attemptId, scenarioId, sourceDigest, status, report }]
-  artifacts:   [{ path, kind, bytes, truncated }]
-  cleanup:     { status, errors } | null
-  ```
-- `dirtyDigest` = sha256 over `git diff HEAD --binary` plus the sorted `(path, sha256)` of each
-  untracked, not-ignored file. The token is never printed; it stays in `session.json` only.
-- `run FILE --scenario ID` validates the ID against `config.scenarios` and stamps it on the attempt.
-- Migration: a schema 2 session is refused with "stop it with the previous version, then start";
-  the check at `src/controller.mjs:871-879` already refuses unknown schemas.
-
-**Acceptance.**
-- A unit test validates a produced manifest against the JSON schema.
-- `dirtyDigest` changes when a tracked file is edited and when an untracked file is added, and
-  stays the same when nothing changed.
-- A manifest from `examples/minimal` in G1 validates.
-
-### P3. One status vocabulary
-
-**Why.** Section C: status is one of `passed`, `failed`, `infrastructure_failed`, `not_run`,
-`unsupported`. Section D: "Distinguish infrastructure failure from application failure, not merely
-by error-message guesswork."
-
-**Today.** Each piece has its own vocabulary:
-
-| Piece | Outcome fields |
-|---|---|
-| Batch | `ok: true/false`, `controllerError`, `diagnosticsError` (`src/batch.mjs:49`, `src/controller.mjs:283-298`) |
-| Session | `starting`, `ready`, `restarting`, `resetting`, `infrastructure-failed`, `cleanup-failed`, `stopped` |
-| Smoke | `ok` plus per-check `ok` |
-| Scenarios | `verified`, `mapped`, `unsupported`, `not-run` (`src/scenarios.mjs:31,133`) |
-| Verdict | pass/FAIL |
-
-**Design.**
-- `src/status.mjs` exports `STATUS = { passed, failed, infrastructure_failed, not_run, unsupported }`
-  (plus `flaky` for scenarios, E3).
-- Every report (batch, `faults.json`, smoke `report.json`, `scenarios.json`) carries `status`.
-  `ok` stays for one minor version for compatibility.
-- A batch's transport or health failure is `infrastructure_failed`, and an assertion or fault is
-  `failed`, decided by where the error came from (the transport `catch` at
-  `src/controller.mjs:283-291` versus the page-side `error`), not by the message.
-- Session lifecycle moves to `state` (P2) so it is not confused with an outcome.
-
-**Acceptance.** A table-driven unit test covers each source of failure and the status it maps to.
-G1 case 4 reports `failed`; killing the container mid-batch reports `infrastructure_failed`.
-
-### P4. Scenario report tied to revision and build
-
-**Why.** Design review delivery step 3: "evidence is tied to current revision". Section C: "`report`:
-join scenario IDs to results for the exact source/build."
-
-**Today.**
-- `scenarios.json` is `{ project, results, problems }` (`src/scenarios.mjs:136-139`), with no
-  commit, build digest or digest of the results file.
-- `{ lane: 'smoke' }` covers are accepted without looking at anything
-  (`src/scenarios.mjs:104-106`). The CI `verdict` holds the lane to success, but locally the report
-  cannot tell.
-
-**Design.**
-- `scenarios.json` gains `source: { commit, dirty, dirtyDigest }` (P2),
-  `results: { path, digest, playwright, startTime }` from the report's `config` and `stats`, and
-  `build: { digest }`.
-- `--lane smoke=.web-harness/smoke/report.json` checks that report: `status: passed` and the same
-  build digest. A lane cover without its report is `mapped`, never `verified`.
-- `--build-digest SHA`, or a digest read from the smoke report, is compared with the digest the E2E
-  run tested. With `WEB_HARNESS_PREBUILT=1` the suite tests the checks job's artifact, so the
-  container run records that digest. A mismatch is a problem: the scenario was proven on different
-  bytes.
-
-**Acceptance.** Mismatched digests exit 1 and name both. A missing lane report downgrades the
-scenario to `mapped` and, with `--results`, exits 1.
-
-### P5. Reconcile after an unknown outcome
-
-**Why.** Section C: "If a transport timeout leaves the action's status unknown, require
-reconciliation before replaying a mutation."
-
-**Today.**
-- A `docker exec` of a batch times out after 180 s (`src/controller.mjs:244`). A transport failure
-  becomes `ok: false` with `controllerError` (`src/controller.mjs:283-291`).
-- Nothing records that the batch's mutating steps may have run. Rerunning it can apply them twice
-  (a set logged twice, a quest completed twice).
-
-**Design.**
-- A transport failure with no page-side report sets `outcome: unknown` in the batch report and
-  `pendingReconciliation: { batchId, sourceDigest, at }` in the manifest.
-- While that is pending, `run` is refused with "the last batch's outcome is unknown; run
-  `web-harness reconcile` or pass `--after-unknown`".
-- `reconcile` runs the read-only captures of an E1 bundle (screenshot, state, storage, aria,
-  network since the batch started), writes them to `batch-<id>/reconcile/`, prints a summary, and
-  clears the flag.
-- Read-only commands (`observe`, `state`, `screenshot`, `check`, `status`) and `stop` stay allowed.
-
-**Acceptance.** A batch that sleeps past a lowered timeout (`WEB_HARNESS_CLI_TIMEOUT_MS`, a new
-setting used for this test) leaves `pendingReconciliation`, and the next `run` is refused.
-`reconcile` clears it and writes the captures.
-
-### P6. Redaction
-
-**Why.** Section C: "Redact credentials, headers and private document content by default." E1 makes
-this matter: it adds request logs, and traces carry full request and response bodies and headers
-(Playwright CLI tracing reference).
-
-**Today.** Nothing redacts. Fault details carry full URLs, including query strings
-(`src/browser.mjs:39-44`, `src/watch.mjs:43-52`). The current evidence is mostly low-risk because
-it is so narrow.
-
-**Design.**
-- One function, `redact(record, policy)`, in `src/evidence.mjs`, used by the rings, the fault
-  recorders, the bundle writers and the manifest.
-- Config and defaults:
-  ```js
-  evidence: {
-    redact: {
-      headers: ['authorization', 'cookie', 'set-cookie', 'x-api-key'],   // never recorded
-      query: [/token/i, /secret/i, /key/i, /code/i, /pair/i],            // values → [redacted]
-      storageValues: false,                                              // keys only (E1)
-    },
-    trace: 'off' | 'retain-on-failure' | 'keep',
-    uploadTraces: false,
-  }
-  ```
-- Headers are recorded only when explicitly allowlisted, and bodies never in harness logs.
-- Traces carry bodies, so `index.json` flags them, and the CI upload guidance (README) excludes
-  `trace.zip` unless `uploadTraces: true`.
-- `doctor` warns when `.web-harness/` is not ignored by git (`git check-ignore`).
-
-**Acceptance.** A request to `/x?token=abc&page=2` is recorded as `/x?token=[redacted]&page=2` in
-faults, the ring and the bundle. An `Authorization` header appears nowhere. `doctor` warns in a repo
-that does not ignore `.web-harness/`.
-
-### H2. Isolate the host server's environment
-
-**Why.** Section A: "Isolate HOME/XDG and browser state." From herdr's cautions: a lab that isolated
-XDG but not HOME could still write into the real home directory.
-
-**Today.**
-- The browser side is isolated: containers run with `HOME=/tmp` and the user's UID
-  (`src/controller.mjs:942-945`, `src/container.mjs:254-267`, preflight probe
-  `src/controller.mjs:421-424`).
-- The host server, which runs the dev server or the static server, inherits the whole environment
-  (`src/controller.mjs:498-505`): the real `HOME`, `XDG_*`, `~/.npmrc`, and any exported
-  credentials (`GH_TOKEN`, `CLOUDFLARE_API_TOKEN`, and so on). A Vite plugin or a dev command can
-  read those or write under the real home.
-
-**Design.**
-- The environment is built from an allowlist, not inherited:
-  - `PATH`, `LANG`, `LC_*`, `TERM`, `NODE_OPTIONS`, `COREPACK_HOME`;
-  - `npm_config_store_dir`, set to the real pnpm store (`pnpm store path`, resolved once in
-    preflight) so `pnpm exec` does not try to rebuild a store;
-  - the controller's `WEB_HARNESS_*` variables;
-  - anything named in a new adapter field, `dev.env: ['VITE_*', 'MY_VAR']`.
-- `HOME` = `<session>/home`, with `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` beneath
-  it, created per session and deleted by `stop`.
-- Anything matching `/TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL/i` is dropped even if a wildcard
-  would allow it, unless listed by exact name.
-
-**Acceptance.**
-- A dev command that prints its environment shows `HOME` under the session directory and no
-  secret-named variables.
-- The dev targets of all four consumers still start (checked by hand, then G1 on the example).
-
-**Open question.** Whether each consumer's `pnpm exec vite` / `npx vite` works without the real
-`HOME` (npm cache location, a private registry in `~/.npmrc`). Verify per consumer before making
-this the default. If one breaks, `dev.env` or an explicit `dev.home: 'real'` escape covers it,
-and the manifest records it.
 
 ---
 
@@ -557,20 +268,20 @@ For orientation, and so that nobody re-implements these:
 | A | `effect` | built (batch helper and command) |
 | A | `check` | built; a11y → A4 |
 | A | reload / restart / reset / stop | built |
-| A | `report` for the exact source/build, keeping failed attempts | attempts built; tied to the build → **P4** |
-| A | isolate HOME/XDG | browser built; host server → **H2** |
+| A | `report` for the exact source/build, keeping failed attempts | built (attempts; `scenarios --lane`, `--build-digest`) |
+| A | isolate HOME/XDG | built (browser and host server) |
 | A | cleanup failure is a harness failure | built |
 | B | two targets, dev accessors read-only, production digest, same artifact validated and deployed | built |
-| C | versioned manifest with the listed fields | partly built; **P2** |
-| C | status vocabulary | **P3** |
+| C | versioned manifest with the listed fields | built (schema 3, `schemas/run-manifest.v3.json`) |
+| C | status vocabulary | built (`src/status.mjs`) |
 | C | run directory with steps, faults, state, events, screenshots, optional trace | built (failure bundles) |
-| C | redaction | **P6** |
+| C | redaction | built (query values, no headers or bodies; traces flagged) |
 | C | retries as attempts | built |
-| C | reconcile before replaying after an unknown outcome | **P5** |
+| C | reconcile before replaying after an unknown outcome | built (`reconcile`, `--after-unknown`) |
 | D | named fixtures through real import paths | built (adapter `fixtures`); in tests → A3 `applyHarnessFixture` |
-| D | clock / locale / timezone, DST variants | **P1**, run by **G2** |
+| D | clock / locale / timezone, DST variants | built (`environment`, batch `clock`); variants run by **G2** |
 | D | one fault policy; expected faults local, counted, missing ones fail | built, in tests and batches |
-| D | infrastructure vs application failure by source | partly built (`infrastructure-failed`); **P3** |
+| D | infrastructure vs application failure by source | built (`infrastructure_failed` by source) |
 | E | production tier: SW update flows | built (smoke `update` phase) |
 | E | production tier: offline/reconnect, security headers | built (`offline`, `online`, header value rules) |
 | E | extended tier on a schedule | **G2** |
@@ -582,5 +293,5 @@ For orientation, and so that nobody re-implements these:
 | F | bound container and host separately | built, with the memory budget |
 | Delivery 1 | controller acceptance in CI | built (`test/acceptance`, required in CI) |
 | Delivery 2 | production restart journey | built; automated in `test/acceptance` |
-| Delivery 3 | scenario inventory and aggregate gate | built; tied to revision → **P4** |
+| Delivery 3 | scenario inventory and aggregate gate | built, tied to revision and build |
 | Delivery 4 | failure bundles explain a real induced defect | built; proven in `test/acceptance` |
