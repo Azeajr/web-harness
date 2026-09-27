@@ -71,9 +71,10 @@ under `web-harness e2e`.
 
 Kept here so they are not lost. Each happens in the consumer's own repository, through a PR.
 
-- **Version bumps.** training-log and tabletop are on v0.1.2; they lack the CPU clamp (v0.1.3) and
-  the rehoming of container results (v0.1.4). chess-mcp is on v0.1.3. Bump each to the latest tag,
-  in the dependency and in every `uses:`, together.
+- **Version bumps.** v0.2.0 carries M0–M5. training-log and tabletop are on v0.1.2; chess-mcp is
+  on v0.1.3; chorequest on v0.1.4. Bump each to v0.2.0, in the dependency and in every `uses:`,
+  together. Breaking for a running session only: a schema 2 session must be stopped with the old
+  version first. The smoke gains an `a11y` phase only where an `a11y` block is configured.
 - **chess-mcp E2E evidence.** Its Playwright config has no retries, trace, screenshot or video.
   Adopting A1 fixes it; until then, add them directly.
 - **Skills.** Run `web-harness skill install` in training-log, tabletop and chorequest. chess-mcp
