@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +19,29 @@ class DockerFailure extends Error {
     super(message);
     this.status = status;
   }
+}
+
+// Where the throwaway workspace is mounted inside the container.
+export const CONTAINER_WORKSPACE = "/work";
+
+// Playwright's JSON report names paths as the container saw them (/work/...). Brought back to the
+// host they must name the checkout, or everything keyed on them — the scenario join above all —
+// finds nothing ("did not run" for every test that did).
+export function rehomeResults(report, root) {
+  const rehome = (value) =>
+    typeof value === "string" &&
+    (value === CONTAINER_WORKSPACE || value.startsWith(`${CONTAINER_WORKSPACE}/`))
+      ? path.join(root, path.relative(CONTAINER_WORKSPACE, value))
+      : value;
+  if (report.config) {
+    report.config.rootDir = rehome(report.config.rootDir);
+    report.config.configFile = rehome(report.config.configFile);
+    for (const project of report.config.projects ?? []) {
+      project.testDir = rehome(project.testDir);
+      project.outputDir = rehome(project.outputDir);
+    }
+  }
+  return report;
 }
 
 function packageManager(config) {
@@ -165,9 +188,15 @@ export async function main(argv) {
 
   async function copyReport() {
     try {
-      await cp(path.join(workspace, "e2e-results.json"), path.join(root, "e2e-results.json"));
-    } catch {
-      /* the run died before the reporter wrote anything */
+      const report = JSON.parse(await readFile(path.join(workspace, "e2e-results.json"), "utf8"));
+      await writeFile(
+        path.join(root, "e2e-results.json"),
+        JSON.stringify(rehomeResults(report, root), null, 2) + "\n",
+      );
+    } catch (error) {
+      // The run died before the reporter wrote anything: say so rather than leave stale results.
+      if (error.code !== "ENOENT") throw error;
+      await rm(path.join(root, "e2e-results.json"), { force: true });
     }
     const source = path.join(workspace, e2e.report);
     try {
@@ -232,16 +261,16 @@ export async function main(argv) {
         "WEB_HARNESS_CONTAINER=1",
         // JSON results come back beside the HTML report, for `web-harness scenarios --results`.
         "-e",
-        "PLAYWRIGHT_JSON_OUTPUT_NAME=/work/e2e-results.json",
+        `PLAYWRIGHT_JSON_OUTPUT_NAME=${CONTAINER_WORKSPACE}/e2e-results.json`,
         ...(prebuilt ? ["-e", "WEB_HARNESS_PREBUILT=1"] : []),
         "-e",
         "HOME=/tmp",
         "-e",
         "COREPACK_ENABLE_DOWNLOAD_PROMPT=0",
         "-v",
-        `${workspace}:/work`,
+        `${workspace}:${CONTAINER_WORKSPACE}`,
         "-w",
-        "/work",
+        CONTAINER_WORKSPACE,
         image,
         "bash",
         "-lc",
