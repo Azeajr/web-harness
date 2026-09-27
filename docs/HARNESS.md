@@ -99,7 +99,10 @@ web-harness cli <playwright-cli args>    # anything else, inside the owned sessi
   open — so `restart` keeps the same instant. `fixed` freezes `Date` while timers run; `install`
   hands a batch the timers: its `clock` helper has `runFor(ms)`, `fastForward(ms | 'mm:ss')`,
   `pauseAt(time)`, `resume()`, `setFixedTime(time)` and `now()`, and says which mode a call needs
-  rather than failing obscurely. What the page actually reports is read back into the manifest. The
+  rather than failing obscurely. A pause lasts for the batch: the Playwright CLI settles every
+  command on a timer inside the page, which a paused clock never fires, so the batch resumes it on
+  exit (`clockResumed` in the report) and time flows on from the paused instant. Do not pause the
+  clock through a raw `cli run-code`; the session would hang. What the page actually reports is read back into the manifest. The
   environment is part of the seed digest: `reset` refuses a changed one. Worth running where a
   product depends on local dates: US spring-forward (2026-03-08 02:00 local), fall-back
   (2026-11-01 02:00 local), `Pacific/Kiritimati` (UTC+14) and `Pacific/Pago_Pago` (UTC−11).

@@ -1,5 +1,6 @@
 import { Script } from "node:vm";
 import { checkExpectation, diffValues, readWatched, settle, stableObservation } from "./effect.mjs";
+import { clockHelper } from "./clock.mjs";
 import { captureStorage, sliceRing } from "./evidence.mjs";
 import { failures, unmetExpectations } from "./faults.mjs";
 import { observe, readState } from "./inspect.mjs";
@@ -95,24 +96,8 @@ export function batchSource(
       if (problem) throw new Error(problem);
       return value;
     };
-    // Timers move only under an installed clock; say so instead of Playwright's generic error.
-    const needsInstall = (name, action) => async (...args) => {
-      if (clockMode !== 'install')
-        throw new Error('clock.' + name + ' needs environment.clock "install" (this session: ' + clockMode + ').');
-      return action(...args);
-    };
-    const clock = {
-      mode: clockMode,
-      runFor: needsInstall('runFor', (ms) => page.clock.runFor(ms)),
-      fastForward: needsInstall('fastForward', (ms) => page.clock.fastForward(ms)),
-      pauseAt: needsInstall('pauseAt', (time) => page.clock.pauseAt(new Date(time))),
-      resume: needsInstall('resume', () => page.clock.resume()),
-      setFixedTime: async (time) => {
-        if (clockMode === 'real') throw new Error('clock.setFixedTime needs environment.clock "fixed" or "install" (this session: real).');
-        return page.clock.setFixedTime(new Date(time));
-      },
-      now: () => page.evaluate(() => Date.now()),
-    };
+    const clock = (${clockHelper.toString()})(page, clockMode);
+    let clockResumed = false;
     let tracing = false;
     if (traceMode !== 'off') {
       try { await context.tracing.start({ screenshots: true, snapshots: true, title: batchId }); tracing = true; }
@@ -120,11 +105,16 @@ export function batchSource(
     }
     let result = null, error = null, unmet = [];
     try {
-      result = await (${expression})(page, {
-        observe: (target, options) => observe(page, target, options),
-        state: sections => readState(page, sections, stateSpec),
-        step, assert, effect, allowFault, expectFault, clock,
-      }) ?? null;
+      try {
+        result = await (${expression})(page, {
+          observe: (target, options) => observe(page, target, options),
+          state: sections => readState(page, sections, stateSpec),
+          step, assert, effect, allowFault, expectFault, clock,
+        }) ?? null;
+      } finally {
+        // A pause lasts for the batch: the CLI's own settling waits on page timers.
+        clockResumed = await clock.release().catch(() => false);
+      }
       // Require serializable results while still inside the evidence-capture boundary.
       JSON.stringify(result);
       // Faults trail their cause: the browser's "Failed to load resource" line, a response body
@@ -169,7 +159,7 @@ export function batchSource(
     // Judged again here: a batch that threw early never reached the check above.
     const own = records().slice(faultMark);
     const missing = unmetExpectations(own, expected);
-    return { ok: error === null, result: error === null ? result : null, error, steps, effects,
+    return { ok: error === null, result: error === null ? result : null, error, steps, effects, clockResumed,
       executionMs: Date.now() - started, artifacts, artifactErrors,
       expectedFaults: expected.map((item) => ({ ...item, met: !missing.includes(item),
         matched: own.filter((record) => (!item.kind || record.kind === item.kind) && new RegExp(item.pattern).test(record.detail)).length })),

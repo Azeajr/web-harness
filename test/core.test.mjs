@@ -388,6 +388,13 @@ test("a batch drives an installed clock, and says why when the session's clock i
     ["pauseAt", "2026-03-08T06:59:00.000Z"],
     ["resume"],
   ]);
+  assert.equal(installed.clockResumed, false, "the batch resumed its own pause");
+  // A batch that leaves the clock paused gets it resumed when it ends: the Playwright CLI settles
+  // every command on a page timer, which a paused clock never fires.
+  const left = await run("async (page, { clock }) => { await clock.pauseAt('2026-03-08T08:00:00Z'); }", "install");
+  assert.equal(left.ok, true, left.error);
+  assert.equal(left.clockResumed, true);
+  assert.deepEqual(calls.slice(-2), [["pauseAt", "2026-03-08T08:00:00.000Z"], ["resume"]]);
   const real = await run("async (page, { clock }) => { await clock.runFor(1000); }", "real");
   assert.equal(real.ok, false);
   assert.match(real.error, /clock\.runFor needs environment\.clock "install" \(this session: real\)/);

@@ -72,6 +72,7 @@ import {
 } from "./evidence.mjs";
 import { observe, readState } from "./inspect.mjs";
 import { environmentConfig, functionSource, loadConfig } from "./config.mjs";
+import { applyClock } from "./clock.mjs";
 import { serverEnvironment } from "./hostenv.mjs";
 import { SCHEMA_VERSION, artifactKind } from "./manifest.mjs";
 import { sourceIdentity } from "./provenance.mjs";
@@ -1105,14 +1106,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     );
     // Applied on every open, so `restart` keeps the same pinned instant (chorequest used to lose it).
     if (environment.clock && environment.clock !== "real")
-      await code(
-        async (page, env) => {
-          if (env.clock === "fixed") await page.clock.setFixedTime(new Date(env.now));
-          else await page.clock.install({ time: new Date(env.now) });
-          return env.clock;
-        },
-        { clock: environment.clock, now: environment.now },
-      );
+      await code(applyClock, { clock: environment.clock, now: environment.now });
   }
 
   // What the page actually runs with, read back — not what was requested.
