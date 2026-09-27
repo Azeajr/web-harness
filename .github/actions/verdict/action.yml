@@ -1,0 +1,24 @@
+name: web-harness verdict
+description: >
+  The one REQUIRED status check. Runs with `if: always()` and fails when any job it needs failed
+  or was cancelled, or when a job that must run for a code change did not. A skipped job never
+  counts as a pass by accident, and a prose-only change still reports a verdict.
+inputs:
+  needs:
+    description: '`${{ toJSON(needs) }}` from the calling job.'
+    required: true
+  code:
+    description: 'The scope job''s `code` output.'
+    required: true
+  required:
+    description: Space-separated job ids that must succeed whenever code is "true".
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        NEEDS: ${{ inputs.needs }}
+        CODE: ${{ inputs.code }}
+        REQUIRED: ${{ inputs.required }}
+      run: node "$GITHUB_ACTION_PATH/verdict.mjs"

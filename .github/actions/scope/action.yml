@@ -1,0 +1,77 @@
+name: web-harness scope
+description: >
+  Decide what a push or pull request needs. A SKIP-LIST for prose (everything else is code, so a
+  new file is covered by not being listed), and an include/exclude pair for what ships. Fails open:
+  with no usable base (new branch, force-push, manual dispatch) everything runs.
+inputs:
+  skip:
+    description: Extended regex of prose-only paths that no test reads.
+    required: false
+    default: '^$'
+  deploy-include:
+    description: Extended regex of paths whose change needs a deploy.
+    required: false
+    default: '.*'
+  deploy-exclude:
+    description: Extended regex of paths that never need a deploy even when included.
+    required: false
+    default: '^$'
+outputs:
+  code:
+    description: '"true" when anything other than listed prose changed.'
+    value: ${{ steps.decide.outputs.code }}
+  deploy:
+    description: '"true" when a push to the default branch changed deployable paths.'
+    value: ${{ steps.decide.outputs.deploy }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+        # The diff needs the merge base; a shallow clone has none.
+        fetch-depth: 0
+    - id: decide
+      shell: bash
+      env:
+        # Interpolated into env, never into the script body: a branch name is attacker-controlled
+        # on a fork PR and `${{ }}` inside `run:` is a shell injection.
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        BEFORE_SHA: ${{ github.event.before }}
+        EVENT: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+        DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        SKIP: ${{ inputs.skip }}
+        DEPLOY_INCLUDE: ${{ inputs.deploy-include }}
+        DEPLOY_EXCLUDE: ${{ inputs.deploy-exclude }}
+      run: |
+        set -euo pipefail
+        shipping=false
+        if [ "$EVENT" != "pull_request" ] && [ "$REF" = "$DEFAULT_REF" ]; then shipping=true; fi
+
+        if [ "$EVENT" = "pull_request" ]; then base="$BASE_SHA"; else base="${BEFORE_SHA:-}"; fi
+        if [ "$EVENT" = "workflow_dispatch" ] || [ -z "${base:-}" ] \
+           || [ "$base" = "0000000000000000000000000000000000000000" ] \
+           || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+          echo "no usable base ref — running everything"
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "deploy=$shipping" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        changed=$(git diff --name-only "$base" "$GITHUB_SHA")
+        echo "changed files:"
+        echo "$changed" | sed 's/^/  /'
+
+        if [ -z "$changed" ] || echo "$changed" | grep -qvE "$SKIP"; then
+          echo "code=true" >> "$GITHUB_OUTPUT"; echo "→ code changed"
+        else
+          echo "code=false" >> "$GITHUB_OUTPUT"; echo "→ prose only"
+        fi
+
+        deployable=$(echo "$changed" | grep -E "$DEPLOY_INCLUDE" | grep -vE "$DEPLOY_EXCLUDE" || true)
+        if [ "$shipping" = true ] && [ -n "$deployable" ]; then
+          echo "deploy=true" >> "$GITHUB_OUTPUT"; echo "→ deployable change on the default branch"
+        else
+          echo "deploy=false" >> "$GITHUB_OUTPUT"
+        fi

@@ -1,0 +1,76 @@
+name: web-harness setup
+description: >
+  Checkout, package manager, Node, a frozen-lockfile install, and optionally Playwright browsers
+  cached by the exact resolved Playwright version (a bump invalidates the cache instead of
+  silently testing against the old browser build).
+inputs:
+  node-version:
+    description: Node.js version.
+    required: true
+  pnpm-version:
+    description: pnpm version when package.json has no packageManager field.
+    required: false
+    default: ''
+  browsers:
+    description: Space-separated Playwright browsers to install (empty for none).
+    required: false
+    default: ''
+  checkout:
+    description: Set "false" when the caller already checked out.
+    required: false
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - if: inputs.checkout == 'true'
+      uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+
+    - id: pm
+      shell: bash
+      run: |
+        if [ -f pnpm-lock.yaml ]; then echo "manager=pnpm" >> "$GITHUB_OUTPUT";
+        elif [ -f package-lock.json ]; then echo "manager=npm" >> "$GITHUB_OUTPUT";
+        else echo "No lockfile" >&2; exit 1; fi
+
+    - if: steps.pm.outputs.manager == 'pnpm'
+      uses: pnpm/action-setup@v6
+      with:
+        version: ${{ inputs.pnpm-version }}
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ steps.pm.outputs.manager }}
+
+    - shell: bash
+      env:
+        MANAGER: ${{ steps.pm.outputs.manager }}
+      run: |
+        if [ "$MANAGER" = pnpm ]; then pnpm install --frozen-lockfile; else npm ci --no-audit --no-fund; fi
+
+    - if: inputs.browsers != ''
+      id: playwright
+      shell: bash
+      run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+    - if: inputs.browsers != ''
+      id: browser-cache
+      uses: actions/cache@v6
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-${{ inputs.browsers }}
+
+    # The browser only on a cache miss; the system libraries every time, since they live outside
+    # the cached directory.
+    - if: inputs.browsers != '' && steps.browser-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        BROWSERS: ${{ inputs.browsers }}
+      run: npx --no-install playwright install --with-deps $BROWSERS
+    - if: inputs.browsers != '' && steps.browser-cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        BROWSERS: ${{ inputs.browsers }}
+      run: npx --no-install playwright install-deps $BROWSERS

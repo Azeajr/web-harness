@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # A local action loads from the checkout, so check out first and tell setup not to again.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          node-version: 24
+          browsers: chromium
+          checkout: 'false'
+      - run: pnpm check
+
+  # The composite actions are part of the product: run them the way consumers do.
+  actions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: scope
+        uses: ./.github/actions/scope
+        with:
+          skip: '^(README\.md|docs/.+\.md|LICENSE)$'
+      - run: test -n "$CODE"
+        env:
+          CODE: ${{ steps.scope.outputs.code }}
+
+  verdict:
+    needs: [test, actions]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/verdict
+        with:
+          needs: ${{ toJSON(needs) }}
+          code: ${{ needs.actions.outputs.code }}
+          required: test
