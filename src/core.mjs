@@ -39,6 +39,8 @@ export const toolCommands = {
   digest: "digest-cli.mjs",
   skill: "skill.mjs",
   promote: "promote.mjs",
+  bench: "bench.mjs",
+  "mutation-score": "mutation-score.mjs",
 };
 const baseValueOptions = [
   "session",

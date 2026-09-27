@@ -35,3 +35,12 @@ test("a project without workflows has nothing to drift", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the reusable extended workflow pins its setup action to this release's own tag", async () => {
+  const { fileURLToPath } = await import("node:url");
+  const repo = fileURLToPath(new URL("..", import.meta.url));
+  const drift = await versionDrift(repo, ownVersion);
+  const extended = drift.references.filter((reference) => reference.file.endsWith("extended.yml"));
+  assert.ok(extended.length >= 2, "setup is referenced by tag");
+  assert.deepEqual(drift.mismatches, [], `bump every @v in .github/workflows to v${ownVersion}`);
+});

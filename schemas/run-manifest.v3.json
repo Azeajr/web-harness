@@ -41,7 +41,7 @@
     },
     "timings": {
       "type": "object",
-      "description": "Milliseconds per start phase.",
+      "description": "Milliseconds per start phase, and the latest restart, reset and reload (every one is in events.jsonl).",
       "required": ["preflight"],
       "properties": {
         "preflight": { "type": "number" },
@@ -49,7 +49,10 @@
         "serverReady": { "type": "number" },
         "container": { "type": "number" },
         "initialize": { "type": "number" },
-        "total": { "type": "number" }
+        "total": { "type": "number" },
+        "restart": { "type": "number" },
+        "reset": { "type": "number" },
+        "reload": { "type": "number" }
       }
     },
     "seed": {
@@ -123,6 +126,22 @@
           "status": { "enum": ["passed", "failed", "infrastructure_failed", "not_run", "unsupported", "flaky"] },
           "error": { "type": ["string", "null"] },
           "at": { "type": "string" }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Peak memory so far, sampled after the latest command.",
+      "properties": {
+        "at": { "type": "string" },
+        "command": { "type": "string" },
+        "container": {
+          "type": ["object", "null"],
+          "properties": { "bytes": { "type": "number" }, "source": { "type": "string", "description": "memory.peak, or docker stats (current, not peak)." } }
+        },
+        "server": {
+          "type": ["object", "null"],
+          "properties": { "pid": { "type": "number" }, "vmHwmKb": { "type": "number" }, "treeVmHwmKb": { "type": "number", "description": "The server and its descendants." } }
         }
       }
     },

@@ -1,0 +1,141 @@
+name: web-harness extended
+
+# The extended tier, called from a consumer's scheduled workflow: mutation testing and the E2E
+# suite in other timezones or Playwright projects. Not a required check — it runs on a schedule —
+# so a failure opens (or updates) one issue, and the next green run closes it.
+#
+# The setup action below is pinned to this release's own tag (a reusable workflow cannot refer to
+# "the ref I was called at"); test/versions.test.mjs keeps it equal to package.json's version.
+#
+#   # .github/workflows/extended.yml in a consumer
+#   on:
+#     schedule: [{ cron: '17 5 * * *' }]
+#     workflow_dispatch:
+#   permissions: { contents: read, issues: write }
+#   jobs:
+#     extended:
+#       uses: Azeajr/web-harness/.github/workflows/extended.yml@vX.Y.Z
+#       with:
+#         mutation: true
+#         mutation-threshold: 60
+#         timezones: '["America/New_York", "Pacific/Kiritimati"]'
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: '24'
+      mutation:
+        description: Run `web-harness mutate` and upload its report.
+        type: boolean
+        default: false
+      mutation-command:
+        description: The command that runs Stryker and writes its JSON report.
+        type: string
+        default: npx --no-install web-harness mutate
+      mutation-threshold:
+        description: Fail when the mutation score is below this (0 disables the check).
+        type: number
+        default: 0
+      mutation-report:
+        description: The Stryker JSON report the score is read from.
+        type: string
+        default: reports/mutation/mutation.json
+      timezones:
+        description: JSON list of IANA zones; the container E2E suite runs once in each.
+        type: string
+        default: '[]'
+      projects:
+        description: JSON list of Playwright projects to run (empty for all).
+        type: string
+        default: '[]'
+      triage:
+        description: Open or update an issue on failure and close it on success (needs issues write).
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    if: inputs.mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: Azeajr/web-harness/.github/actions/setup@v0.1.4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Mutation testing
+        env:
+          COMMAND: ${{ inputs.mutation-command }}
+        run: bash -c "$COMMAND"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          if-no-files-found: ignore
+      - name: Mutation score threshold
+        if: inputs.mutation-threshold > 0
+        env:
+          REPORT: ${{ inputs.mutation-report }}
+          THRESHOLD: ${{ inputs.mutation-threshold }}
+        run: npx --no-install web-harness mutation-score "$REPORT" --min "$THRESHOLD"
+
+  e2e-matrix:
+    if: inputs.timezones != '[]' || inputs.projects != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        timezone: ${{ fromJSON(inputs.timezones != '[]' && inputs.timezones || '["default"]') }}
+        project: ${{ fromJSON(inputs.projects != '[]' && inputs.projects || '["all"]') }}
+    steps:
+      - uses: Azeajr/web-harness/.github/actions/setup@v0.1.4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Container E2E
+        env:
+          TIMEZONE: ${{ matrix.timezone }}
+          PROJECT: ${{ matrix.project }}
+        run: |
+          args=()
+          if [ "$TIMEZONE" != default ]; then args+=(--timezone "$TIMEZONE"); fi
+          if [ "$PROJECT" != all ]; then args+=(--project "$PROJECT"); fi
+          npx --no-install web-harness e2e "${args[@]}"
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ strategy.job-index }}
+          path: playwright-report/
+          if-no-files-found: ignore
+
+  triage:
+    needs: [mutation, e2e-matrix]
+    if: always() && inputs.triage && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close the extended-tier issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          title="extended: scheduled coverage failing"
+          failed=$(jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key' <<<"$NEEDS" | paste -sd, -)
+          existing=$(gh issue list --repo "$REPO" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$failed" ]; then
+            body="Failing: $failed. Run: $RUN"
+            if [ -n "$existing" ]; then gh issue comment "$existing" --repo "$REPO" --body "$body";
+            else gh issue create --repo "$REPO" --title "$title" --body "$body"; fi
+          elif [ -n "$existing" ]; then
+            gh issue close "$existing" --repo "$REPO" --comment "Green again: $RUN"
+          fi

@@ -75,6 +75,7 @@ import { observe, readState } from "./inspect.mjs";
 import { environmentConfig, functionSource, loadConfig } from "./config.mjs";
 import { A11Y_BOUNDARY, a11yConfig, axeLoaderSource, axeSource, classifyA11y, runAxe } from "./a11y.mjs";
 import { applyClock } from "./clock.mjs";
+import { containerPeak, serverPeak } from "./metrics.mjs";
 import { serverEnvironment } from "./hostenv.mjs";
 import { SCHEMA_VERSION, artifactKind } from "./manifest.mjs";
 import { sourceIdentity } from "./provenance.mjs";
@@ -177,8 +178,8 @@ Usage: web-harness [--session NAME] <command> [options]
   reconcile       After a batch whose outcome is unknown (a transport timeout): capture the
                   current state beside it and allow runs again (or pass run --after-unknown)
   describe [--json]  This project as an agent needs it: fixtures, state, scenarios, targets, commands
-Tools: serve, smoke, e2e, scenarios, mutate, digest, promote BATCH --to SPEC --title T,
-  skill install [--dir .claude/skills|.agents/skills]
+Tools: serve, smoke, e2e, scenarios, mutate, mutation-score, digest, bench [--repeat N],
+  promote BATCH --to SPEC --title T, skill install [--dir .claude/skills|.agents/skills]
 
 Start/preflight: --target dev|production (default dev) --fixture NAME
   --browser ${config.defaults.browser} --device "${config.defaults.device}"
@@ -257,6 +258,23 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       ],
     };
     console.log(JSON.stringify(report, null, 2));
+  }
+
+  // Peak memory of both processes so far (the container's cgroup peak, the server tree's VmHWM),
+  // in the manifest and events.jsonl after each command. Never fails the command it measures.
+  async function recordMetrics(command) {
+    try {
+      const sample = {
+        command,
+        container: await containerPeak(docker, manifest.containerId),
+        server: await serverPeak(manifest.server?.pid),
+      };
+      manifest.metrics = { at: new Date().toISOString(), ...sample };
+      await save();
+      await event("metrics", sample);
+    } catch {
+      /* measurement is evidence, not a gate */
+    }
   }
 
   async function save() {
@@ -1525,6 +1543,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       phase("total", startedAt);
       await save();
       creating = false;
+      await recordMetrics("start");
       return;
     }
     if (!manifest) {
@@ -1546,6 +1565,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       if (manifest.state !== "stopped") {
         await health().catch(() => {});
         await check({ throwOnFault: false });
+        await recordMetrics("stop");
       }
       return cleanup();
     }
@@ -1594,9 +1614,10 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       throw error;
     }
     await event("command", { command, args: positional });
-    if (command === "effect") return effectCommand(positional, options.watch);
-    if (command === "reconcile") return reconcile();
-    if (structuredOutput) return structuredCommand(command, positional, options);
+    if (command === "effect") return effectCommand(positional, options.watch).finally(() => recordMetrics(command));
+    if (command === "reconcile") return reconcile().finally(() => recordMetrics(command));
+    if (structuredOutput) return structuredCommand(command, positional, options).finally(() => recordMetrics(command));
+    const commandStarted = performance.now();
     if (command === "reset") {
       const seed = await prepareFixture(manifest.options);
       if (seed.digest !== manifest.seed.digest)
@@ -1632,6 +1653,14 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       console.log(await cli(positional));
     }
     await health();
+    // Lifecycle timings beside start's: the latest of each, and every one in events.jsonl.
+    if (["reset", "restart", "reload"].includes(command)) {
+      const ms = Math.round(performance.now() - commandStarted);
+      manifest.timings[command] = ms;
+      await save();
+      await event("timing", { command, ms });
+    }
+    await recordMetrics(command);
   }
 
   try {
