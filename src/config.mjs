@@ -2,7 +2,8 @@ import { access, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Script } from "node:vm";
-import { slug } from "./core.mjs";
+import { TRACE_MODES, slug } from "./core.mjs";
+import { DEFAULT_REDACT_QUERY } from "./evidence.mjs";
 import { faultPolicy } from "./faults.mjs";
 
 export const CONFIG_FILE = "harness.config.mjs";
@@ -90,6 +91,11 @@ export function validateConfig(raw, root) {
   if (config.state.defaults.some((section) => !config.state.sections.includes(section)))
     throw new Error("state.defaults must be registered sections.");
   config.policy = faultPolicy(raw.faults);
+  config.evidence = evidenceConfig(raw.evidence);
+  if (raw.durable !== undefined) {
+    if (typeof raw.durable?.read !== "function") throw new Error("durable.read(page) must be a function.");
+    functionSource(raw.durable.read, "durable.read");
+  }
   config.scenarios = raw.scenarios ?? [];
   return config;
 }
@@ -113,6 +119,27 @@ export async function loadConfig(start) {
       throw new Error("No pnpm-lock.yaml or package-lock.json; set packageManager in the config.");
   }
   return config;
+}
+
+// What failure evidence keeps, and what it never keeps. Query values whose names match a redaction
+// pattern are replaced before a URL reaches any record, ring, bundle or timeline.
+export function evidenceConfig(raw = {}) {
+  const trace = raw.trace ?? "off";
+  if (!TRACE_MODES.includes(trace)) throw new Error(`evidence.trace must be ${TRACE_MODES.join(", ")}.`);
+  const query = raw.redact?.query ?? [];
+  if (!Array.isArray(query)) throw new Error("evidence.redact.query must be an array.");
+  const sources = query.map((pattern) => {
+    const text = pattern instanceof RegExp ? pattern.source : pattern;
+    if (typeof text !== "string" || !text) throw new Error("evidence.redact.query patterns must be strings.");
+    new RegExp(text);
+    return text;
+  });
+  return {
+    trace,
+    redactQuery: [...DEFAULT_REDACT_QUERY, ...sources],
+    requestCap: raw.requestCap ?? 2000,
+    consoleCap: raw.consoleCap ?? 1000,
+  };
 }
 
 // Identity helper for editor types in harness.config.mjs: `export default defineHarness({...})`.

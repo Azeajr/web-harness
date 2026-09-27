@@ -1,3 +1,5 @@
+import { evidenceConfig } from "./config.mjs";
+import { toJsonl } from "./evidence.mjs";
 import { failures, faultPolicy, unmetExpectations } from "./faults.mjs";
 import { watchContext } from "./watch.mjs";
 
@@ -13,8 +15,12 @@ import { watchContext } from "./watch.mjs";
 //   watchContext     wire a context the test built itself (browser.newContext())
 //   allowPageFaults  excuse faults this test causes on purpose (any kind; this test only)
 //   expectPageFault  like allow, but the fault MUST occur: a failure path that never fired fails
+//
+// A failing test gets network.jsonl and console.jsonl attached (every request and console line
+// of its context, bounded and redacted), next to Playwright's own trace, screenshot and video.
 export function createHarnessTest(base, harness = {}) {
   const policy = faultPolicy(harness.faults);
+  const evidence = evidenceConfig(harness.evidence);
   return base.extend({
     pageFaultGuard: [
       async ({ context, baseURL }, use, testInfo) => {
@@ -25,7 +31,7 @@ export function createHarnessTest(base, harness = {}) {
         const record = (kind, detail) => records.push({ kind, detail });
         const guard = {
           watch: (target) =>
-            watchContext(target, { policy, origin, record, initScript: harness.initScript }),
+            watchContext(target, { policy, origin, record, initScript: harness.initScript, evidence }),
           allow(patterns) {
             allowed.push(...patterns);
           },
@@ -38,15 +44,21 @@ export function createHarnessTest(base, harness = {}) {
           faults: () => failures(records, policy, allowed),
         };
 
-        await guard.watch(context);
+        const rings = await guard.watch(context);
         await use(guard);
 
+        const attachEvidence = async () => {
+          for (const [name, ring] of [["network.jsonl", rings.requests], ["console.jsonl", rings.console]])
+            await testInfo.attach(name, { body: toJsonl(ring.entries), contentType: "application/x-ndjson" });
+        };
+        if (testInfo.status !== testInfo.expectedStatus) await attachEvidence();
         // Only assert on an otherwise-passing test: a page error is usually the cause of a
         // failure that already carries a clearer message.
         if (testInfo.status === "passed") {
           const remaining = guard.faults();
           const unmet = unmetExpectations(records, expected);
-          if (remaining.length || unmet.length)
+          if (remaining.length || unmet.length) {
+            await attachEvidence();
             throw new Error(
               [
                 ...remaining.map((fault) => `${fault.kind} — ${fault.detail}`),
@@ -55,6 +67,7 @@ export function createHarnessTest(base, harness = {}) {
                 ),
               ].join("\n"),
             );
+          }
         }
       },
       { auto: true },
@@ -69,6 +82,28 @@ export function createHarnessTest(base, harness = {}) {
       await use((kind, pattern) => pageFaultGuard.expect(kind, pattern));
     },
   });
+}
+
+// Shared Playwright config fields, so every suite keeps the same evidence of a failure: the trace
+// of the attempt that FAILED (not only of its retry), a screenshot and video, one retry that must
+// not turn a flaky test green, and no focused-only runs in CI. Spread into defineConfig:
+//
+//   export default defineConfig({ ...harnessPlaywright(harness), testDir: 'tests/e2e', webServer })
+export function harnessPlaywright(harness = {}, overrides = {}) {
+  const ci = Boolean(process.env.CI);
+  return {
+    forbidOnly: ci,
+    retries: ci ? 1 : 0,
+    failOnFlakyTests: ci,
+    reporter: [["list"], ["html", { open: "never" }]],
+    ...overrides,
+    use: {
+      trace: "retain-on-failure",
+      screenshot: "only-on-failure",
+      video: "retain-on-failure",
+      ...overrides.use,
+    },
+  };
 }
 
 // Playwright `webServer` for the production target: build, then serve the output exactly as the

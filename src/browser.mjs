@@ -12,6 +12,8 @@ export async function installPolicy(page, config, lib) {
     throw new Error("Policy already installed; reset the profile first.");
   context.__webHarnessFaults = [];
   context.__webHarnessWarnings = [];
+  // Every request and console line, bounded, for failure bundles (src/evidence.mjs).
+  if (config.evidence) lib.installEvidence(context, config.evidence, lib);
   const { policy, origin } = config;
   const record = (kind, detail) =>
     context.__webHarnessFaults.push({ at: new Date().toISOString(), kind, detail });

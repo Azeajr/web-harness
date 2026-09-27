@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 import { slug } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
 
-// web-harness scenarios [--results playwright-results.json] [--output FILE]
+// web-harness scenarios [--results playwright-results.json] [--output FILE] [--allow-flaky]
 //
 // The executable scenario inventory. Each critical journey the project names in
 // harness.config.mjs must either map to conventional tests that exist (and, given a Playwright
@@ -55,8 +55,9 @@ export function titleMatcher(title) {
   return (candidate) => pattern.test(candidate);
 }
 
-// Flatten a Playwright JSON report into { file, title, outcome } rows. `title` is the test's own
-// title; describe blocks are not part of the match.
+// Flatten a Playwright JSON report into { file, title, outcome, attempts } rows. `title` is the
+// test's own title; describe blocks are not part of the match. Every attempt is kept: a retry that
+// passed does not erase the failure before it.
 export function flattenResults(report, rootDir = "") {
   const rows = [];
   const visit = (suite, file) => {
@@ -68,6 +69,12 @@ export function flattenResults(report, rootDir = "") {
           title: spec.title,
           project: test.projectName,
           outcome: test.status ?? test.results?.at(-1)?.status,
+          attempts: (test.results ?? []).map((result) => ({
+            retry: result.retry ?? 0,
+            status: result.status,
+            ms: result.duration ?? null,
+            error: result.error?.message?.split("\n")[0]?.slice(0, 300) ?? null,
+          })),
         });
     for (const child of suite.suites ?? []) visit(child, current);
   };
@@ -81,6 +88,7 @@ export async function main(argv) {
     options: {
       results: { type: "string" },
       output: { type: "string", default: ".web-harness/scenarios.json" },
+      "allow-flaky": { type: "boolean", default: false },
     },
     strict: true,
   });
@@ -100,6 +108,7 @@ export async function main(argv) {
       continue;
     }
     const covered = [];
+    let flaky = false;
     for (const cover of scenario.covers) {
       if (cover.lane) {
         covered.push(cover); // proven by a required CI lane; the verdict job holds it to that
@@ -124,18 +133,30 @@ export async function main(argv) {
           (row) => row.file === path.normalize(cover.file) && matchesTitle(row.title),
         );
         if (!matches.length) problems.push(`${scenario.id}: "${cover.test}" did not run.`);
-        for (const match of matches)
-          if (!["expected", "passed", "flaky"].includes(match.outcome))
+        for (const match of matches) {
+          if (match.outcome === "flaky") {
+            flaky = true;
+            const failed = match.attempts.filter((attempt) => attempt.status !== "passed").length;
+            if (!values["allow-flaky"])
+              problems.push(
+                `${scenario.id}: "${cover.test}" [${match.project}] flaky — failed ${failed} attempt(s) before passing.`,
+              );
+          } else if (!["expected", "passed"].includes(match.outcome))
             problems.push(`${scenario.id}: "${cover.test}" [${match.project}] ${match.outcome}.`);
-        covered.push({ ...cover, outcomes: matches.map((match) => `${match.project}:${match.outcome}`) });
+        }
+        covered.push({
+          ...cover,
+          outcomes: matches.map((match) => `${match.project}:${match.outcome}`),
+          attempts: matches.map((match) => ({ project: match.project, attempts: match.attempts })),
+        });
       } else covered.push(cover);
     }
-    results.push({ id: scenario.id, status: rows ? "verified" : "mapped", covers: covered });
+    results.push({ id: scenario.id, status: rows ? (flaky ? "flaky" : "verified") : "mapped", covers: covered });
   }
   await mkdir(path.dirname(path.resolve(config.root, values.output)), { recursive: true });
   await writeFile(
     path.resolve(config.root, values.output),
-    JSON.stringify({ project: config.name, results, problems }, null, 2) + "\n",
+    JSON.stringify({ project: config.name, allowFlaky: values["allow-flaky"], results, problems }, null, 2) + "\n",
   );
   for (const result of results)
     console.log(`${result.status.padEnd(12)}${result.id}${result.reason ? ` — ${result.reason}` : ""}`);

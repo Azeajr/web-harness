@@ -109,8 +109,12 @@ test("batch stops at failed assertion and retains step, screenshot and state evi
       ["broken", false],
     ],
   );
-  assert.deepEqual(screenshots, ["/tmp/evidence.png"]);
+  assert.deepEqual(screenshots, ["/tmp/evidence/bundle/screenshot.png"]);
   assert.equal(result.artifacts.state.revision, 2);
+  // The rest of the bundle is returned for the controller to write; a context without evidence
+  // rings says so rather than pretending the network was quiet.
+  assert.equal(result.bundle.url, "http://127.0.0.1:1/");
+  assert.ok(result.artifactErrors.some((error) => error.startsWith("evidence: no request/console rings")));
 });
 
 test("batch captures retained faults and serialization errors without masking original failures", async () => {
@@ -131,7 +135,11 @@ test("batch captures retained faults and serialization errors without masking or
   const failed = await execute(page);
   assert.equal(failed.ok, false);
   assert.match(failed.error, /earlier fault/);
-  assert.equal(failed.artifactErrors.length, 2);
+  for (const capture of ["screenshot: page closed", "state: state unavailable", "storage: state unavailable"])
+    assert.ok(
+      failed.artifactErrors.some((error) => error.startsWith(capture)),
+      `${capture} in ${JSON.stringify(failed.artifactErrors)}`,
+    );
   page.context = () => ({ __webHarnessFaults: [] });
   const success = await execute(page);
   assert.equal(success.ok, true);
@@ -306,4 +314,68 @@ test("build digests track bytes and paths, not timestamps", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("a batch excuses and requires only its own faults, and marks what it excused", async () => {
+  const context = { __webHarnessFaults: [] };
+  const page = {
+    context: () => context,
+    url: () => "http://127.0.0.1:1/",
+    screenshot: async () => {},
+    evaluate: async () => null,
+  };
+  const read = "{ sections: [], defaults: [], target: 'dev', read: () => null }";
+  const run = (source) =>
+    runInNewContext(batchSource(source, "/tmp/evidence", { policy, stateSpec: read, batchId: "b1" }))(page);
+  const expected = await run(`async (page, { expectFault }) => {
+    expectFault('http', /500/);
+    page.context().__webHarnessFaults.push({ kind: 'http', detail: '500 http://127.0.0.1:1/x' });
+  }`);
+  assert.equal(expected.ok, true, expected.error);
+  assert.equal(context.__webHarnessFaults[0].excusedBy, "b1", "kept as evidence, marked excused");
+  assert.deepEqual(JSON.parse(JSON.stringify(expected.expectedFaults)), [{ kind: "http", pattern: "500", met: true, matched: 1 }]);
+  // Later judges (check, the next batch) no longer count it.
+  const next = await run("async () => 'next'");
+  assert.equal(next.ok, true, next.error);
+
+  const unmet = await run(`async (page, { expectFault }) => { expectFault('http', /503/); }`);
+  assert.equal(unmet.ok, false);
+  assert.match(unmet.error, /expected http matching \/503\/ never occurred/);
+  assert.equal(unmet.expectedFaults[0].met, false);
+
+  // A fault from before the batch cannot be excused by it.
+  context.__webHarnessFaults.push({ kind: "http", detail: "500 http://127.0.0.1:1/early" });
+  const late = await run(`async (page, { allowFault }) => { allowFault(/500/); }`);
+  assert.equal(late.ok, false);
+  assert.match(late.error, /early/);
+});
+
+test("a batch waits for its own in-flight requests without timer globals", async () => {
+  // runInNewContext, like Playwright CLI run-code, has no setTimeout.
+  const request = { seq: 1, url: "http://127.0.0.1:1/slow", ms: null, failure: null };
+  const context = {
+    __webHarnessFaults: [],
+    __webHarnessEvidence: { seq: 0, requests: { entries: [], dropped: 0 }, console: { entries: [], dropped: 0 } },
+  };
+  let waited = 0;
+  const page = {
+    context: () => context,
+    url: () => "http://127.0.0.1:1/",
+    screenshot: async () => {},
+    evaluate: async () => true,
+    waitForTimeout: async () => {
+      waited++;
+      request.ms = 5;
+    },
+  };
+  const read = "{ sections: [], defaults: [], target: 'dev', read: () => null }";
+  const result = await runInNewContext(
+    batchSource(
+      "async (page) => { page.context().__webHarnessEvidence.requests.entries.push(page.__request); page.context().__webHarnessEvidence.seq = 1; }",
+      "/tmp/evidence",
+      { policy, stateSpec: read },
+    ),
+  )({ ...page, __request: request });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(waited, 1, "polled through the page until the request finished");
 });

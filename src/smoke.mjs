@@ -4,6 +4,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { directoryDigest } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
+import { toJsonl } from "./evidence.mjs";
 import { failures } from "./faults.mjs";
 import { createStaticServer } from "./static-server.mjs";
 import { watchContext } from "./watch.mjs";
@@ -61,6 +62,7 @@ export async function main(argv) {
   const origin = served.url;
   let browser;
   let page;
+  let rings = null;
   try {
     const response = await fetch(`${origin}/`);
     const html = await response.text();
@@ -77,12 +79,13 @@ export async function main(argv) {
     browser = await chromium.launch({ headless: !values.headed });
     const context = await browser.newContext({ serviceWorkers: "allow" });
     const record = (kind, detail) => report.faults.push({ kind, detail, phase: report.phase });
-    await watchContext(context, {
+    rings = await watchContext(context, {
       policy: config.policy,
       origin,
       record,
       warn: (detail) => report.warnings.push(detail),
       initScript: config.initScript,
+      evidence: config.evidence,
     });
     page = await context.newPage();
     const ready = async () => {
@@ -168,6 +171,12 @@ export async function main(argv) {
         .screenshot({ path: path.join(output, "failure.png"), fullPage: true })
         .then(() => (report.screenshot = path.join(output, "failure.png")))
         .catch(() => {});
+    // Every request and console line of the run, for explaining the failure without a rerun.
+    if (rings) {
+      await writeFile(path.join(output, "network.jsonl"), toJsonl(rings.requests.entries));
+      await writeFile(path.join(output, "console.jsonl"), toJsonl(rings.console.entries));
+      report.evidence = { network: path.join(output, "network.jsonl"), console: path.join(output, "console.jsonl") };
+    }
   } finally {
     await browser?.close().catch(() => {});
     await served.close();
