@@ -4,7 +4,7 @@ One harness for four offline-first Vite PWAs. It exists to close one loop:
 
 > start an owned environment → apply a reproducible fixture through the real UI → act through
 > visible controls → observe narrow state and visible effects → assert a terminal condition → keep
-> the failure evidence → promote the reproduction into an ordinary test → verify the artifact that
+> a failure bundle → promote the reproduction into an ordinary test → verify the artifact that
 > actually ships.
 
 Every piece below serves a step of that loop. Where a piece cannot prove something, it says so.
@@ -14,6 +14,8 @@ Every piece below serves a step of that loop. Where a piece cannot prove somethi
 | Command / export | Step | Proof boundary |
 |---|---|---|
 | `web-harness start/run/observe/state/check/…` | explore | A Linux Docker browser (pinned Playwright image) against an owned local server. Emulated devices, not real iOS. |
+| `effect` (batch helper and command) | observe | What changed around one action — and that something did. Sequential reads, not one atomic snapshot. |
+| failure bundles | keep evidence | Every request and console line (bounded, redacted), the accessibility tree, storage and service-worker state, a merged timeline, optionally a trace. |
 | `createHarnessTest` (`/playwright`) | regress | The same fault policy as a session, in the project's Playwright suite. |
 | `productionServer`, `web-harness serve` | regress, explore | The built bundle with `public/_headers` applied and SPA fallback, like Pages. No Pages Functions, no edge. |
 | `web-harness smoke` | ship | This artifact's headers, bundle, SW control, persistence, offline reload — in Chromium. |
@@ -38,7 +40,9 @@ export default defineHarness({
   ready,                                // SERIALIZED: app is interactive
   fixtures: { configured: { apply } },  // apply is SERIALIZED and drives the real UI
   state: { sections, defaults, read },  // read is SERIALIZED and runs in the page (dev only)
+  durable: { read },                    // SERIALIZED, (page) => the app's persisted state; any target
   faults: { allowed, watchedWarnings, unservedPrefixes },
+  evidence: { trace, redact: { query } },
   smoke: { requiredHeaders, ready, persist, verify },
   e2e: { config, snapshots, prepare },
   scenarios: [...],
@@ -46,7 +50,7 @@ export default defineHarness({
 ```
 
 **SERIALIZED** functions travel as source text into Playwright CLI `run-code`, which has no module
-scope and no `URL` or `Buffer` globals. They may use `page`, their arguments, and ECMAScript
+scope and no `URL`, `Buffer` or `setTimeout` globals (wait with `page.waitForTimeout`). They may use `page`, their arguments, and ECMAScript
 built-ins only. Method shorthand is fine; closures over the config file are not. Fixture data that
 must reach a file input is written by the controller to `dataFile` (a `file` property in the
 prepared data becomes that file's whole content).
@@ -67,7 +71,9 @@ instead of inventing an answer: assert visible UI or durable storage there.
 ```sh
 web-harness preflight                    # Docker, pinned image, device, port — installs nothing
 web-harness start [--target production] [--fixture NAME] [--browser B --device D] [--port P]
-web-harness run FILE                     # batched (page, {step, assert, observe, state}) => …
+web-harness run FILE [--trace MODE]      # batched (page, {step, assert, observe, state, effect,
+                                         #   allowFault, expectFault}) => …
+web-harness effect --observe SEL … -- CLI  # diff what is watched around one CLI action
 web-harness observe SELECTOR | state     # compact JSON
 web-harness reload                       # same page, same storage
 web-harness restart                      # close and reopen on the SAME profile (durability)
@@ -89,9 +95,69 @@ web-harness cli <playwright-cli args>    # anything else, inside the owned sessi
   document survives a relaunch. Faults from the closed lifetime are retained. `reset` deletes the
   profile and replays the fixture; it refuses a changed fixture or setup digest.
 - **Batches.** `run` executes trusted repository code in the session: a failed `step` or `assert`
-  stops the batch, the screenshot and state are captured without masking the original error, and
-  any retained fault fails an otherwise passing batch. Output over 16 KB is summarized; the full
-  report stays on disk.
+  stops the batch, a failure bundle is kept without masking the original error, and any retained
+  fault fails an otherwise passing batch. Output over 16 KB is summarized; the full report stays
+  in `batch-<id>/report.json`.
+- **Attempts.** Running the same batch source again in the same run is another attempt: the report
+  carries `attempt` and every `priorAttempts` outcome, so a later pass never hides an earlier
+  failure.
+- **Faults a batch causes on purpose.** `allowFault(pattern)` excuses, and `expectFault(kind,
+  pattern)` excuses *and requires*, faults recorded during this batch only — never earlier ones.
+  An expectation that never fires fails the batch. Excused records stay in every fault report,
+  marked `excusedBy`, and later checks do not count them again. A batch lets what it started
+  settle (its requests finish, the DOM goes quiet; at most 3 s) before judging faults, because
+  faults trail their cause — the browser's own "Failed to load resource" line arrives after the
+  response.
+
+### `effect`: what an action changed
+
+```js
+await effect('save', () => page.getByRole('button', { name: 'Save' }).click(), {
+  observe: ['#saved'],          // bounded observe() of each, reduced to text, visibility, attributes
+  state: ['document'],          // dev accessor sections (unsupported on production, and said so)
+  durable: true,                // the adapter's durable.read, on any target
+  settle: (page) => …,          // optional completion condition; default below
+  screenshot: false,            // true: effect-N-before.png / -after.png in the batch directory
+  expect: 'change',             // or 'none', or { 'durable.note.revision': (now, then) => now > then }
+})
+```
+
+It reads everything watched, runs the action as a step, settles, reads again, and records a
+bounded diff (`changed` paths with before and after, `unchanged` count) in the report's `effects`.
+`expect: 'change'` fails the quiet no-op — the click that did nothing — and `'none'` fails a cancel
+or a disabled control that changed something. Without `settle`, it waits for same-origin requests
+started by the action to finish, then for 150 ms without DOM mutations, then two animation frames,
+at most 5 s, and reports `settled: false` rather than failing when it runs out. Storage writes are
+invisible to the network check; pass `settle` (or `--until SELECTOR` on the command) when a
+completion signal exists.
+
+The command form wraps one Playwright CLI action for agents working command by command:
+`web-harness effect --observe '#saved' --durable --expect change -- click e12`.
+
+## Failure evidence
+
+A failed batch keeps `batch-<id>/bundle/`; a failed `check`, `start`, `restart`, `reset` or
+`reload` keeps `failure-<n>/` in the run directory. Each holds:
+
+| File | What |
+|---|---|
+| `index.json` | the files, their sizes and drop counts, capture errors, and a `summary`: first counted fault, last failed requests, last console error, URL, a waiting service worker |
+| `timeline.jsonl` | controller events, steps, faults, console lines and requests merged by time — read top to bottom |
+| `network.jsonl` | every request since the batch began (plus 50 before it): method, URL, type, status, failure, duration, whether the service worker made it |
+| `console.jsonl` | every console line at every level, with its location |
+| `aria.yml` | the accessibility tree: what a person could see and reach |
+| `storage.json` | storage estimate, localStorage/sessionStorage keys (never values), IndexedDB names and versions, cache names, the service-worker registration |
+| `state.json`, `faults.json`, `screenshot.png` | the dev state read, every fault record (marked counted or not), the viewport |
+| `trace.zip` | with `run --trace retain-on-failure` (or `start --trace …` for the session, or `evidence.trace`) |
+
+Requests and console lines are kept in bounded rings on the browser context (2,000 and 1,000; the
+oldest drop and are counted), so they survive reloads that the CLI's own logs do not. Query values
+whose names match `token`, `secret`, `key`, `code`, `pair`, `auth`, `password`, `session` or
+`evidence.redact.query` are replaced with `[redacted]` before they are recorded; headers and bodies
+are never recorded — except in `trace.zip`, which Playwright writes with bodies and headers, so
+`index.json` flags it and it should stay local. The captures are sequential: a screenshot and an
+asynchronous state read are not one moment, and the bundle says so. The batch's stdout carries the
+`summary` and the bundle path, so the first read is usually enough.
 
 ### Completion evidence
 
@@ -122,7 +188,22 @@ with the same functions from `src/faults.mjs`:
 Project-wide `allowed` patterns excuse only page and console output. A test excuses its own induced
 faults with `allowPageFaults(pattern)`, or requires them with `expectPageFault(kind, pattern)` — an
 expected fault that never fires fails the test, so a failure path cannot silently stop being
-exercised. Fault checks run only on otherwise-passing tests, whose own failure is usually clearer.
+exercised. Batches do the same with `allowFault` and `expectFault`. Fault checks run only on
+otherwise-passing tests, whose own failure is usually clearer.
+
+## Playwright suites
+
+```ts
+// playwright.config.ts
+export default defineConfig({ ...harnessPlaywright(harness, { use: { ...devices['iPhone 13 Mini'] } }), … })
+```
+
+`harnessPlaywright` gives every suite the same evidence of a failure: `trace: 'retain-on-failure'`
+(the trace of the attempt that failed — `on-first-retry` records only the retry), screenshot and
+video on failure, `forbidOnly`, one retry in CI, and `failOnFlakyTests` in CI so that retry cannot
+turn a flaky test green. `createHarnessTest` attaches `network.jsonl` and `console.jsonl` to every
+failing test. `web-harness scenarios` reports a scenario whose test passed only on retry as
+`flaky` — a failure unless `--allow-flaky` — and keeps every attempt in `scenarios.json`.
 
 ## Production smoke
 

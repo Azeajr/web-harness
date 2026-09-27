@@ -24,6 +24,18 @@ export interface FaultConfig {
   unservedPrefixes?: string[];
 }
 
+export interface EvidenceConfig {
+  /** Default trace for `run` batches: off (default), retain-on-failure, or keep. */
+  trace?: "off" | "retain-on-failure" | "keep";
+  redact?: {
+    /** Query parameter names (regex sources) whose values never reach evidence. Added to the defaults. */
+    query?: (string | RegExp)[];
+  };
+  /** Ring sizes for every request and console line kept on a browser context. */
+  requestCap?: number;
+  consoleCap?: number;
+}
+
 export interface Fixture {
   description?: string;
   /**
@@ -86,7 +98,13 @@ export interface HarnessConfig {
     /** SERIALIZED, runs IN THE PAGE via page.evaluate: read-only development accessor. */
     read?: (sections: string[]) => unknown;
   };
+  /**
+   * SERIALIZED, runs Node-side with the page (production-safe, read-only): the app's own durable
+   * state, e.g. a record read from IndexedDB. `effect` reads it before and after an action.
+   */
+  durable?: { read: (page: Page) => Promise<unknown> };
   faults?: FaultConfig;
+  evidence?: EvidenceConfig;
   smoke?: {
     dist?: string;
     requiredHeaders?: string[];

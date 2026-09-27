@@ -123,8 +123,36 @@ test("scenario inventory: every scenario is covered or says why not", () => {
     "tests/e2e",
   );
   assert.deepEqual(rows, [
-    { file: "tests/e2e/workout.spec.ts", title: "finishes", project: "chromium", outcome: "expected" },
-    { file: "tests/e2e/workout.spec.ts", title: "inner", project: "chromium", outcome: "unexpected" },
+    { file: "tests/e2e/workout.spec.ts", title: "finishes", project: "chromium", outcome: "expected", attempts: [] },
+    { file: "tests/e2e/workout.spec.ts", title: "inner", project: "chromium", outcome: "unexpected", attempts: [] },
+  ]);
+  // A retry that passed keeps the failure before it.
+  const [flaky] = flattenResults({
+    suites: [
+      {
+        file: "a.spec.ts",
+        specs: [
+          {
+            title: "wobbles",
+            tests: [
+              {
+                projectName: "chromium",
+                status: "flaky",
+                results: [
+                  { retry: 0, status: "failed", duration: 12, error: { message: "Timeout 5000ms exceeded\nstack" } },
+                  { retry: 1, status: "passed", duration: 9 },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(flaky.outcome, "flaky");
+  assert.deepEqual(flaky.attempts, [
+    { retry: 0, status: "failed", ms: 12, error: "Timeout 5000ms exceeded" },
+    { retry: 1, status: "passed", ms: 9, error: null },
   ]);
 });
 

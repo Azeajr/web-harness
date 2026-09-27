@@ -90,7 +90,8 @@ export function isUnservedLoad(text, location, origin, policy) {
 
 // Faults that remain after excuses. Project-wide allowances excuse only what the page says;
 // `local` holds one test's or scenario's own declared allowances, which may name any kind — a
-// test that aborts a route on purpose excuses that request failure, for that test alone.
+// test that aborts a route on purpose excuses that request failure, for that test alone. A record
+// a batch already excused (`excusedBy`) stays in the evidence and never counts again.
 // Self-contained: serialized into batch run-code.
 export function failures(records, policy, local = []) {
   if (!Array.isArray(records)) throw new Error("Fault collector is missing. Reset the session.");
@@ -100,6 +101,7 @@ export function failures(records, policy, local = []) {
   return records.filter(
     (record) =>
       !(
+        record.excusedBy ||
         (excusable.includes(record.kind) && global.some((pattern) => pattern.test(record.detail))) ||
         scoped.some((pattern) => pattern.test(record.detail))
       ),

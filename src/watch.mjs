@@ -1,3 +1,4 @@
+import { installEvidence, pushRing, redactUrl } from "./evidence.mjs";
 import {
   STUB_EXTERNAL,
   consoleKind,
@@ -11,8 +12,17 @@ import {
 // failed or erroring same-origin requests, and escaped external calls (stubbed, and recorded
 // unless the policy says stub-only). Used by the Playwright fixture and the production smoke;
 // the controller's installPolicy is the serialized twin of this and classifies with the same
-// functions from faults.mjs.
-export async function watchContext(target, { policy, origin, record, warn = () => {}, initScript }) {
+// functions from faults.mjs. Also keeps the evidence rings (every request and console line,
+// bounded) that a failure attaches; returns them.
+export async function watchContext(
+  target,
+  { policy, origin, record, warn = () => {}, initScript, evidence = {} },
+) {
+  const rings = installEvidence(
+    target,
+    { redactQuery: evidence.redactQuery ?? [], requestCap: evidence.requestCap ?? 2000, consoleCap: evidence.consoleCap ?? 1000 },
+    { redactUrl, pushRing },
+  );
   const attach = (page) => {
     page.on("pageerror", (error) => record("pageerror", `${error.name}: ${error.message}`));
     page.on("crash", () => record("crash", "Browser page crashed"));
@@ -61,4 +71,5 @@ export async function watchContext(target, { policy, origin, record, warn = () =
     },
   );
   if (initScript) await target.addInitScript({ content: `(${initScript.toString()})();` });
+  return rings;
 }

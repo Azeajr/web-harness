@@ -23,11 +23,6 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 
 | ID | Item | Size | Milestone |
 |---|---|---|---|
-| [E1](#e1-failure-bundles) | Failure bundles: trace, network, console, storage, DOM | L | M1 |
-| [E2](#e2-effect-before-and-after-around-one-action) | `effect`: before/after around one action | M | M1 |
-| [E3](#e3-retries-are-attempts-flaky-is-not-verified) | Retries are attempts; flaky is not verified | S | M1 |
-| [E4](#e4-expected-and-allowed-faults-inside-batches) | Expected and allowed faults inside batches | S | M1 |
-| [A1](#a1-shared-playwright-preset) | Shared Playwright preset | S | M1 |
 | [O1](#o1-update-flow-in-the-production-smoke) | Update flow in the production smoke | M | M2 |
 | [O2](#o2-smoke-back-online-and-header-values) | Smoke: back online, and header values | S | M2 |
 | [P1](#p1-clock-timezone-and-locale) | Clock, timezone and locale | M | M3 |
@@ -50,10 +45,8 @@ every `uses:` reference together (README, "Released by tag").
 
 - **M0 — Foundation** shipped: the memory budget (H1), the acceptance suite against
   `examples/minimal` in CI (G1), and housekeeping. Later items are proven by extending that suite.
-- **M1 — Agent evidence.** The core purpose: an agent exercises a workflow and keeps enough
-  evidence to explain a failure without re-running it. E1 and E2 are the substance; E3 and E4 stop
-  the evidence from lying (a hidden flaky failure, a correct error path reported as a failure). A1
-  gives the Playwright suites the same evidence.
+- **M1 — Agent evidence** shipped: failure bundles (E1), `effect` (E2), attempts and flaky
+  scenarios (E3), batch-local fault expectations (E4) and the shared Playwright preset (A1).
 - **M2 — Offline-first proof.** O1 closes the one common PWA failure nothing checks today: a new
   deploy that never reaches, or breaks, an installed client.
 - **M3 — Determinism and provenance.** Make every run reproducible and attributable: environment
@@ -61,277 +54,6 @@ every `uses:` reference together (README, "Released by tag").
   replays, nothing sensitive in evidence, the host server isolated.
 - **M4 — Agent ergonomics.** Ship the skill, close the promote-to-test step, add accessibility.
 - **M5 — Extended tier and measurement.** Scheduled coverage and harness performance baselines.
-
----
-
-## M1 — Agent evidence
-
-### E1. Failure bundles
-
-**Why.**
-- The loop in `docs/HARNESS.md:5-8` includes "keep a failure bundle".
-- The design review (section C): "Full evidence goes to a run directory: manifest, steps, faults,
-  state snapshots, command/events log, screenshots on failure or requested visual states, optional
-  trace started before reproduction."
-- From herdr: "Failure evidence is a directory containing states, screens, logs, merged timeline
-  and command history — not just a screenshot."
-
-The purpose is that an agent, or a person later, can explain a failure from the bundle alone,
-without replaying it.
-
-**Today.**
-- A failed batch captures a PNG and one state read into flat files beside the batch
-  (`src/batch.mjs:40-48`), and the controller then writes `faults.json` (`src/controller.mjs:292-298`).
-- Nothing records the request log or console log:
-  - The Playwright CLI's own logs are cleared right after seeding (`src/controller.mjs:732-733`).
-  - Those logs are scoped to a navigation (`src/browser.mjs:7-8`).
-  - The policy records only failures: failed requests, HTTP ≥ 400, external calls, error console
-    lines (`src/browser.mjs:21-45`). A successful request sequence, which is often what explains a
-    wrong result, is never kept.
-- Not captured at failure: an accessibility-tree snapshot, storage and service-worker state, or a
-  trace.
-- A failure in `start` or `check` keeps even less than a failed batch.
-
-**Design.**
-- **Directory per batch.** `<runDir>/batch-<id>/` holds `source.js`, `wrapped.js` and
-  `report.json`, plus `bundle/` on failure. This replaces today's flat `batch-<id>.*` files; the
-  stdout JSON keeps the same keys and adds `bundle`.
-- **Request ring on the context**, next to `__webHarnessFaults`:
-  - `installPolicy` (`src/browser.mjs:9`) and `watchContext` (`src/watch.mjs:15`) both keep
-    `__webHarnessRequests`.
-  - Recorded from `request`, `requestfinished`, `requestfailed` and `response`.
-  - Entry: `{ seq, at, method, url, resourceType, status, fromServiceWorker, failure, ms }`. URLs
-    pass through P6 redaction.
-  - No bodies, and no headers unless allowlisted (P6).
-  - Capped at 2,000 entries; overflow is counted in `dropped`, never silently lost.
-  - Because it is on the context, it survives reloads, unlike the CLI's navigation-scoped log.
-- **Console ring:** every console message at every level, `{ seq, at, type, text (≤ 500 chars),
-  location }`, capped at 1,000. Today only error-level and watched lines survive, as faults or
-  warnings.
-- **Batch markers.** At batch start the wrapper records the current `seq` of each ring, so the
-  bundle can show "during this batch" plus the 50 entries before it for context.
-- **On failure, `bundle/` contains:**
-  - `screenshot.png` (as today), `state.json` (as today; `unsupported` on production).
-  - `aria.yml`: `page.locator('body').ariaSnapshot()` (available in Playwright 1.63), a bounded,
-    text-first view of what the user could see and reach.
-  - `network.jsonl` and `console.jsonl`: the slices described above.
-  - `faults.json`: every record, with a flag for which ones count as faults.
-  - `storage.json`: `navigator.storage.estimate()`, localStorage keys only (never values),
-    `indexedDB.databases()` names and versions, `caches.keys()`, the service-worker registration
-    (the active, waiting and installing script URLs and states, and whether a controller is
-    present), plus the URL and viewport. For offline-first apps this is usually where the answer
-    is.
-  - `timeline.jsonl`: `events.jsonl` (controller), steps (start and end), faults, console lines and
-    requests merged by timestamp, each tagged `{ runId, batchId, attempt, source }`. This is the one
-    file to read top to bottom. Captures are sequential and it must say so: a screenshot and an
-    asynchronous state read are not atomic (design review, section C).
-  - `index.json`: each file with its byte size, truncation or `dropped` counts, and any capture
-    error. A failed capture never replaces the original error (existing rule, `artifactErrors` at
-    `src/batch.mjs:20,42-47`).
-- **Trace.**
-  - `run FILE --trace` (and `start --trace` for the whole session) starts
-    `context.tracing.start({ screenshots: true, snapshots: true })` before the batch.
-  - On failure it stops into `bundle/trace.zip`. On success the trace is discarded, unless
-    `--trace=keep`.
-  - Default off, as the review says: an "optional trace started before reproduction". Config key
-    `evidence.trace` changes the default.
-  - Traces include request and response bodies and headers (Playwright CLI tracing reference), so
-    `index.json` flags `trace.zip` as possibly containing private data (P6).
-- **Summary on stdout.** The batch JSON stays under the 16 KB limit (`src/controller.mjs:320-333`),
-  and on failure adds `summary`: the first fault, the last three failed or ≥ 400 requests, the last
-  error-level console line, the final URL, the waiting service worker if any, and the bundle path.
-  The agent gets the gist in one read and opens files only when needed.
-- **Other failures.** `start` (after the container exists), `check` and `restart` failures write a
-  bundle too, under `<runDir>/failure-<n>/`.
-- **Playwright parity.** `createHarnessTest` (`src/playwright.mjs:16`) attaches `network.jsonl`
-  and `console.jsonl` to `testInfo` when a test fails, so E2E failures carry the same evidence.
-  A1 covers the trace.
-
-**Acceptance.**
-- Against `examples/minimal`, a batch that calls an endpoint answering 500 and then fails an
-  assertion produces a bundle in which:
-  - `network.jsonl` contains the 500 and the successful requests before it;
-  - `console.jsonl` contains the page's log lines;
-  - `aria.yml`, `storage.json` (listing the IndexedDB database and the SW registration) and
-    `timeline.jsonl` exist, and the timeline is in order;
-  - with `--trace`, `trace.zip` opens with `npx playwright show-trace`.
-- A passing batch writes no `bundle/` and, without `keep`, no trace.
-- Ring caps are enforced and reported in `index.json`.
-- Stdout stays ≤ 16 KB and contains `summary.bundle`.
-- A failing E2E test on the example has `network.jsonl` and `console.jsonl` attachments.
-
-**Tests.** Unit tests for the ring buffer (cap, `dropped`, slicing by `seq`) and the timeline merge
-(pure functions); Docker acceptance in G1.
-
-**Open questions.**
-- Whether `context.tracing` started inside `run-code` coexists with the CLI's own
-  `tracing-start`/`tracing-stop` (Playwright CLI 1.63 has both). Only one trace can run per
-  context, so the controller should own tracing and add `tracing-start`/`tracing-stop` to the
-  refused `cli` subcommands (`src/controller.mjs:1058-1068`).
-- Whether traces on a persistent-profile context behave the same across `restart`. Expected: the
-  trace ends with the closed browser.
-
-### E2. `effect`: before and after around one action
-
-**Why.**
-- The design review's command list includes `effect` beside `observe` and `state`.
-- From herdr: `effect` "compares state across instances and client screens around a real input
-  event. This catches a button acting on the wrong peer even when the API works."
-- Section D: "'No exception,' 'button clicked,' and 'screenshot written' are insufficient."
-
-The commonest agent mistake this catches is a click that silently did nothing, or changed
-something other than what was intended.
-
-**Today.** There is no before/after primitive. Agents hand-roll `observe`/`state` calls around an
-action in a batch, inconsistently, and a no-op usually passes.
-
-**Design.**
-- **Batch helper:** `effect(name, action, watch)`, where `watch` is:
-  ```js
-  {
-    observe: ['.move-tree', '[role=dialog]'],   // selectors, read with observe() (bounded)
-    state: ['document', 'ui'],                   // dev accessor sections (dev target)
-    durable: true,                               // adapter durable.read (below)
-    url: true,                                   // default true
-    screenshot: false,                           // true → before.png / after.png in the batch dir
-    settle: async (page) => {},                  // optional condition; default: quiescence
-    expect: 'change' | 'none' | { 'state.document.revision': (v, before) => v > before },
-  }
-  ```
-- **Sequence:**
-  1. Read everything watched ("before").
-  2. Run `action` inside `step(name)`.
-  3. Settle: the adapter's `settle(page)` if given; otherwise quiescence, meaning no same-origin
-     request in flight (from E1's ring) and two animation frames, within 5 s. Never a fixed sleep.
-  4. Read everything again ("after").
-  5. Compute a bounded structural diff.
-- **Diff format:** `{ changed: [{ path, before, after }], unchanged: [path], truncated }`. Values
-  are shortened to 200 characters, and there are at most 50 entries.
-- **`expect`:**
-  - `'change'` fails with "no watched change" when every watched target is identical, which is the
-    silent no-op.
-  - `'none'` fails when anything changed (cancel paths, disabled controls, read-only views).
-  - An object asserts specific paths.
-- **Record** into the batch report as `effects[]`, and into E1's timeline.
-- **CLI form,** for agents driving single CLI actions rather than batches:
-  `web-harness effect --observe '.move-tree' [--state document] [--expect change] -- click e12`.
-  It runs the watched reads, the `cli` action, settle, and the reads again, then prints the diff.
-- **Production target:** `state` is `unsupported` (`src/inspect.mjs:98-105`), so `effect` uses
-  `observe`, `url` and `durable`, and says which watches were unsupported rather than silently
-  dropping them.
-- **Adapter `durable.read`** (SERIALIZED, production-safe and read-only): the app's own persisted
-  summary. For example, chess reads the IndexedDB `kv` store; chorequest can count OPFS SQLite rows
-  through a read-only path if one exists. This is optional: without it, `durable` is `unsupported`.
-  **Open question:** how training-log and tabletop can read OPFS SQLite from the page without going
-  through the app's worker. If they can't, `durable` stays unsupported there and the visible UI is
-  the proof.
-- **Honesty:** before and after are sequential reads with timestamps, not a transaction.
-
-**Acceptance (on `examples/minimal`).**
-- Clicking Save with `expect: 'change'` and `durable: true` passes, and the diff shows the stored
-  value.
-- Clicking a disabled button with `expect: 'change'` fails with "no watched change".
-- Cancelling a dialog with `expect: 'none'` passes.
-- The diff stays within its bounds on a large region.
-- The CLI form works for `click`.
-
-### E3. Retries are attempts; flaky is not verified
-
-**Why.** Design review section C: "Record retries as separate attempts. A passing retry does not
-erase an earlier failure."
-
-**Today.**
-- `scenarios` accepts `flaky` as a pass (`src/scenarios.mjs:128`). It reads only the final status
-  per test (`src/scenarios.mjs:70`), so individual attempts are lost.
-- Three consumers retry once in CI: training-log (`playwright.config.ts:7`), tabletop (`:11`),
-  chorequest (`:7`). A test that fails and then passes is green, and the scenario is `verified`.
-- Their traces are `on-first-retry` (training-log `:15`, tabletop `:20`, chorequest `:21`). That
-  records the retry, not the failing attempt, so the failure itself has at best a screenshot or
-  video.
-
-**Design.**
-- `flattenResults` keeps attempts: `attempts: [{ retry, status, ms, error }]` per row, from
-  Playwright JSON `tests[].results[]`.
-- New scenario status `flaky`. It is a problem (exit 1) unless `--allow-flaky` is passed, which
-  prints every flaky scenario and records the flag in `scenarios.json`. `verified` requires every
-  run of every cover to be `expected` with no failed attempt.
-- A1 sets `failOnFlakyTests: Boolean(process.env.CI)`, a Playwright config option present in 1.63
-  (`failOnFlakyTests?: boolean` in `playwright/types/test.d.ts`), so the suite itself fails too.
-- Controller batches never retry on their own. When an agent reruns a batch with the same
-  `sourceDigest` (already computed, `src/controller.mjs:305`) within one run, the report gets
-  `attempt: n` and `priorAttempts: [{ batchId, ok, error }]`, so a later pass shows the earlier
-  failure.
-
-**Acceptance.**
-- A crafted report where a test fails and then passes makes `scenarios --results` exit 1 with
-  "flaky".
-- `--allow-flaky` exits 0 and still lists the scenario as `flaky`.
-- A batch that fails, is rerun unchanged and passes reports `attempt: 2` with the prior failure.
-
-### E4. Expected and allowed faults inside batches
-
-**Why.** Section D: "Expected faults must be scenario-local, narrowly matched and counted; missing
-expected faults fail too. Record all faults even when expected." The Playwright fixture does this;
-controller batches do not.
-
-**Today.**
-- A batch fails on any retained fault that the project-wide policy does not excuse
-  (`src/batch.mjs:38-39`).
-- `createHarnessTest` has `allowPageFaults` and `expectPageFault` (`src/playwright.mjs:26-36,
-  65-70`) with `unmetExpectations` (`src/faults.mjs:111`).
-- An agent deliberately exercising an error path (offline save, invalid import, a stubbed 500)
-  gets a failed batch even when the app behaved correctly. The only escape is editing
-  `faults.allowed` in `harness.config.mjs`, which excuses the fault for every session and test.
-
-**Design.**
-- Batch helpers `allowFault(pattern)` and `expectFault(kind, pattern)`, with the same semantics as
-  the fixture: `failures(records, policy, local)` plus `unmetExpectations`.
-- Scope: only faults recorded after the batch started (by E1's fault `seq`). Earlier faults cannot
-  be excused from inside a later batch.
-- Report: `expectedFaults: [{ kind, pattern, met, matched: n }]` and `allowedFaults: [...]`. Every
-  record is kept.
-- Persistence: excused records are marked (`excusedBy: batchId`) in the context's records, so a
-  later `check` (`src/controller.mjs:599-673`) does not fail on them, and a `restart` carries the
-  mark into `retainedFaults`.
-
-**Acceptance.**
-- A batch that triggers a 500 with `expectFault('http', /500/)` passes.
-- The same batch without the helper fails.
-- An `expectFault` that never fires fails with "expected http matching /500/ never occurred".
-- A `check` after the passing batch reports zero faults and still lists the record.
-
-### A1. Shared Playwright preset
-
-**Why.** Failure evidence in the four E2E suites differs by accident, not by design:
-
-| Consumer | retries (CI) | trace | screenshot | video |
-|---|---|---|---|---|
-| training-log | 1 | on-first-retry | only-on-failure | retain-on-failure |
-| tabletop | 1 | on-first-retry | only-on-failure | — |
-| chorequest | 1 | on-first-retry | only-on-failure | retain-on-failure |
-| chess-mcp | — | — | — | — |
-
-(`playwright.config.ts` in each; chess at `apps/ui/playwright.config.ts`.) A red chess E2E run in
-CI carries only the error message.
-
-**Design.**
-- Export `harnessPlaywright(harness, overrides)` from `@azeajr/web-harness/playwright`. It returns
-  config fields to spread:
-  - `forbidOnly: CI`
-  - `retries: CI ? 1 : 0`
-  - `failOnFlakyTests: CI` (E3)
-  - `use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', video: 'retain-on-failure',
-    timezoneId, locale }`, with the last two from P1
-  - `reporter`: list and html, plus json when `PLAYWRIGHT_JSON_OUTPUT_NAME` is set (the container
-    already sets it, `src/container.mjs:264`).
-- `retain-on-failure` keeps the trace of the attempt that failed, which is the evidence `on-first-
-  retry` misses.
-- Keep one retry: the rerun shows whether the failure reproduces, and `failOnFlakyTests` keeps it
-  from turning green.
-- Document the preset in `docs/HARNESS.md` and the README.
-
-**Acceptance.** All four consumers adopt it (Appendix A). A deliberately failing test in each
-produces `trace.zip` for the failing attempt, plus E1's network and console attachments.
 
 ---
 
@@ -923,30 +645,30 @@ For orientation, and so that nobody re-implements these:
 |---|---|---|
 | A | `doctor` | built, with the memory budget |
 | A | `start --target` | built |
-| A | `run` with step history | built; attempts → E3 |
+| A | `run` with step history | built, with attempts |
 | A | `observe`, `state` | built |
-| A | `effect` | **E2** |
+| A | `effect` | built (batch helper and command) |
 | A | `check` | built; a11y → A4 |
 | A | reload / restart / reset / stop | built |
-| A | `report` for the exact source/build, keeping failed attempts | partly built (`scenarios`); **P4**, **E3** |
+| A | `report` for the exact source/build, keeping failed attempts | attempts built; tied to the build → **P4** |
 | A | isolate HOME/XDG | browser built; host server → **H2** |
 | A | cleanup failure is a harness failure | built |
 | B | two targets, dev accessors read-only, production digest, same artifact validated and deployed | built |
 | C | versioned manifest with the listed fields | partly built; **P2** |
 | C | status vocabulary | **P3** |
-| C | run directory with steps, faults, state, events, screenshots, optional trace | partly built; **E1** |
+| C | run directory with steps, faults, state, events, screenshots, optional trace | built (failure bundles) |
 | C | redaction | **P6** |
-| C | retries as attempts | **E3** |
+| C | retries as attempts | built |
 | C | reconcile before replaying after an unknown outcome | **P5** |
 | D | named fixtures through real import paths | built (adapter `fixtures`); in tests → A3 `applyHarnessFixture` |
 | D | clock / locale / timezone, DST variants | **P1**, run by **G2** |
-| D | one fault policy; expected faults local, counted, missing ones fail | built in tests; in batches → **E4** |
+| D | one fault policy; expected faults local, counted, missing ones fail | built, in tests and batches |
 | D | infrastructure vs application failure by source | partly built (`infrastructure-failed`); **P3** |
 | E | production tier: SW update flows | **O1** |
 | E | production tier: offline/reconnect, security headers | offline and presence built; **O2** |
 | E | extended tier on a schedule | **G2** |
 | E | always-reporting aggregate verdict; deploy consumes the validated artifact | built |
-| E | fail on focused-only tests | consumers set `forbidOnly`; preset → **A1** |
+| E | fail on focused-only tests | built (`harnessPlaywright`) |
 | E | mutation in isolation | built; scheduling → **G2** |
 | F | warm session, batching, narrow state, build once | built |
 | F | measure equivalent scenarios | **H3** |
@@ -954,4 +676,4 @@ For orientation, and so that nobody re-implements these:
 | Delivery 1 | controller acceptance in CI | built (`test/acceptance`, required in CI) |
 | Delivery 2 | production restart journey | built; automated in `test/acceptance` |
 | Delivery 3 | scenario inventory and aggregate gate | built; tied to revision → **P4** |
-| Delivery 4 | failure bundles explain a real induced defect | **E1** acceptance |
+| Delivery 4 | failure bundles explain a real induced defect | built; proven in `test/acceptance` |

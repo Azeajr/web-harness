@@ -23,6 +23,7 @@ export const commands = [
   "observe",
   "state",
   "run",
+  "effect",
 ];
 const baseValueOptions = [
   "session",
@@ -36,8 +37,37 @@ const baseValueOptions = [
   "workflow",
   "output",
   "port",
+  "trace",
 ];
 const flagOptions = new Set(["help", "full-page", "hires", "force-resources"]);
+
+export const TRACE_MODES = ["off", "retain-on-failure", "keep"];
+
+// `effect [--observe SEL]... [--state a,b] [--durable] [--until SEL] [--expect change|none]
+// -- <cli command>`: watch options, then the Playwright CLI action to run between the two reads.
+function parseEffect(args, options) {
+  const watch = { observe: [], state: [], durable: false, until: null, expect: null };
+  while (args.length && args[0] !== "--") {
+    const arg = args.shift();
+    const [key, ...rest] = arg.startsWith("--") ? arg.slice(2).split("=") : [null];
+    const value = () => {
+      const next = rest.length ? rest.join("=") : args.shift();
+      if (!next || next.startsWith("--")) throw new Error(`Missing value for --${key}.`);
+      return next;
+    };
+    if (key === "observe") watch.observe.push(value());
+    else if (key === "state") watch.state.push(...value().split(",").filter(Boolean));
+    else if (key === "durable") watch.durable = true;
+    else if (key === "until") watch.until = value();
+    else if (key === "expect") {
+      watch.expect = value();
+      if (!["change", "none"].includes(watch.expect)) throw new Error("--expect must be change or none.");
+    } else throw new Error(`Unknown effect option: ${arg}`);
+  }
+  if (args[0] !== "--" || args.length < 2)
+    throw new Error("effect needs a Playwright CLI command after --, e.g. effect --observe '#saved' -- click e12");
+  return { command: "effect", options: { ...options, watch }, positional: args.slice(1) };
+}
 
 export function slug(value, label = "session") {
   if (typeof value !== "string" || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(value))
@@ -73,6 +103,7 @@ export function parseArgs(input, { extraValueOptions = [] } = {}) {
       command = arg;
       if (!commands.includes(command)) throw new Error(`Unknown command: ${command}`);
       if (command === "cli") return { command, options, positional: args };
+      if (command === "effect") return parseEffect(args, options);
     } else positional.push(arg);
   }
   if (positional.length > (["screenshot", "observe", "run"].includes(command) ? 1 : 0))
@@ -81,6 +112,8 @@ export function parseArgs(input, { extraValueOptions = [] } = {}) {
     throw new Error(
       `${command} requires ${command === "run" ? "a repository file" : "a locator selector"}.`,
     );
+  if (options.trace && !TRACE_MODES.includes(options.trace))
+    throw new Error(`--trace must be ${TRACE_MODES.join(", ")}.`);
   if (options.target && !["dev", "production"].includes(options.target))
     throw new Error("--target must be dev or production.");
   if (options.target === "production" && options.url)

@@ -69,11 +69,13 @@ $("confirm-delete").addEventListener("click", async () => {
   $("status").textContent = "Deleted";
 });
 
-// Without public/404.html, Pages (and the harness server) would answer the miss with the SPA shell
-// and status 200; with it, the miss is a 404 and an `http` fault.
+// A miss must be a 404 on both targets. In production, public/404.html makes Pages (and the harness
+// server) answer 404 instead of the SPA shell; in development, Vite serves the shell to any request
+// that accepts HTML — fetch() sends Accept: */* — so this one asks for JSON only.
 $("break").addEventListener("click", async () => {
   console.error("induced failure");
-  await fetch("/missing.json").catch(() => null);
+  const response = await fetch("/missing.json", { headers: { accept: "application/json" } }).catch(() => null);
+  await response?.text();
 });
 
 // A Pages Function in production; the harness server answers 404 and must not call it a fault.

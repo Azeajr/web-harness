@@ -72,19 +72,73 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.equal(state.result.note.text, "from a batch");
   });
 
-  await t.test("a batch that faults fails, keeping the original error and its evidence", async () => {
-    const result = await session(["run", "batches/break.js"]);
+  await t.test("effect passes a real change and a cancel, and fails the quiet no-op", async () => {
+    const good = await session(["run", "batches/effects.js"]);
+    const report = lastJson(good.stdout);
+    assert.equal(good.code, 0, JSON.stringify(report));
+    assert.deepEqual(report.effects.map((item) => item.name), ["save a note", "cancel the delete dialog"]);
+    assert.ok(report.effects[0].changed.some((change) => change.path === "durable.note.text"), JSON.stringify(report.effects[0]));
+    assert.equal(report.effects[1].changedCount, 0, JSON.stringify(report.effects[1]));
+    const noop = await session(["run", "batches/noop.js"]);
+    assert.equal(noop.code, 1);
+    assert.match(lastJson(noop.stdout).error, /archive the note: no watched change/);
+  });
+
+  await t.test("the CLI form of effect diffs around one Playwright CLI action", async () => {
+    const changed = await session([
+      "effect", "--observe", "#saved", "--durable", "--until", '#saved:has-text("via the cli")', "--expect", "change",
+      "--", "eval", "() => { document.getElementById('note').value = 'via the cli'; document.getElementById('save').click(); }",
+    ]);
+    const report = lastJson(changed.stdout);
+    assert.equal(changed.code, 0, JSON.stringify(report));
+    assert.ok(report.changed.some((change) => change.path === "durable.note.text" && /via the cli/.test(change.after)), JSON.stringify(report.changed));
+    const still = await session(["effect", "--observe", "#saved", "--expect", "change", "--", "eval", "() => document.getElementById('archive').click()"]);
+    assert.equal(still.code, 1);
+    assert.match(lastJson(still.stdout).error, /no watched change/);
+  });
+
+  await t.test("a batch that expects its faults passes, and check no longer counts them", async () => {
+    const result = await session(["run", "batches/expected-fault.js"]);
+    const report = lastJson(result.stdout);
+    assert.equal(result.code, 0, JSON.stringify(report));
+    assert.ok(report.expectedFaults.length === 2 && report.expectedFaults.every((item) => item.met), JSON.stringify(report.expectedFaults));
+    const checked = await session(["check"]);
+    assert.equal(checked.code, 0, checked.stderr);
+    const faults = JSON.parse(await readFile(path.join((await manifest()).runDir, "faults.json"), "utf8"));
+    assert.ok(faults.records.some((record) => record.excusedBy && /induced failure/.test(record.detail)), "kept as evidence");
+  });
+
+  await t.test("a batch that faults fails, keeping the original error and a full bundle", async () => {
+    const result = await session(["run", "batches/break.js", "--trace", "retain-on-failure"]);
     assert.equal(result.code, 1);
     const report = lastJson(result.stdout);
     assert.equal(report.ok, false);
     assert.match(report.error, /retained browser fault/);
-    assert.ok(await exists(report.artifacts.screenshot), "failure screenshot");
     assert.ok(await exists(report.faultsReport), "faults.json");
+    const bundle = report.summary.bundle;
+    for (const file of ["index.json", "network.jsonl", "console.jsonl", "aria.yml", "storage.json", "timeline.jsonl", "faults.json", "screenshot.png", "trace.zip"])
+      assert.ok(await exists(path.join(bundle, file)), `bundle has ${file}`);
+    const lines = async (file) => (await readFile(path.join(bundle, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok((await lines("network.jsonl")).some((request) => /missing\.json/.test(request.url) && request.status === 404));
+    assert.ok((await lines("console.jsonl")).some((line) => line.text === "induced failure"));
+    assert.ok((await lines("timeline.jsonl")).some((row) => row.source === "step" && row.name === "press Break"));
+    const storage = JSON.parse(await readFile(path.join(bundle, "storage.json"), "utf8"));
+    assert.ok(storage.indexedDB.some((database) => database.name === "notes"), JSON.stringify(storage.indexedDB));
+    assert.match(await readFile(path.join(bundle, "aria.yml"), "utf8"), /Notes/);
+    assert.match(report.summary.firstFault, /induced failure|missing\.json/);
+    const index = JSON.parse(await readFile(path.join(bundle, "index.json"), "utf8"));
+    assert.match(index.privateData, /trace\.zip/);
+    // The same batch again is a second attempt, and says the first one failed.
+    const again = lastJson((await session(["run", "batches/break.js"])).stdout);
+    assert.equal(again.attempt, 2);
+    assert.equal(again.priorAttempts[0].ok, false);
   });
 
   await t.test("faults from before a restart are retained, not laundered", async () => {
     const result = await session(["restart"]);
     assert.equal(result.code, 1, "the retained faults fail the restart's check");
+    const bundle = /Failure bundle: (\S+)/.exec(result.stderr)?.[1];
+    assert.ok(bundle && (await exists(path.join(bundle, "index.json"))), result.stderr.slice(-1000));
     const faults = JSON.parse(await readFile(path.join((await manifest()).runDir, "faults.json"), "utf8"));
     assert.ok(faults.faults.some((fault) => /induced failure/.test(fault.detail)), JSON.stringify(faults.faults));
   });
@@ -270,4 +324,35 @@ test("e2e: the suite runs in the pinned container and the scenario join verifies
   assert.equal(scenarios.code, 0, scenarios.stderr + scenarios.stdout);
   assert.match(scenarios.stdout, /verified\s+save-note/);
   assert.match(scenarios.stdout, /unsupported\s+installed-phone/);
+});
+
+test("playwright: a failing test carries the network and console evidence", { timeout: 10 * 60_000 }, async () => {
+  const { root } = example;
+  const spec = path.join(root, "tests/e2e/zz-failing.spec.js");
+  await writeFile(
+    spec,
+    `import { expect, test } from "./fixtures.js";
+test("fails on purpose", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("#saved")).toHaveText("never", { timeout: 1000 });
+});
+`,
+  );
+  try {
+    const run = await exec("npx", ["--no-install", "playwright", "test", "tests/e2e/zz-failing.spec.js", "--reporter=json"], {
+      cwd: root,
+      env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: "zz-results.json" },
+    });
+    assert.equal(run.code, 1, "the test fails");
+    const results = JSON.parse(await readFile(path.join(root, "zz-results.json"), "utf8"));
+    const attempt = results.suites[0].specs[0].tests[0].results[0];
+    const names = attempt.attachments.map((attachment) => attachment.name);
+    for (const name of ["network.jsonl", "console.jsonl", "trace", "screenshot"])
+      assert.ok(names.includes(name), `${name} in ${names}`);
+    const network = attempt.attachments.find((attachment) => attachment.name === "network.jsonl");
+    assert.match(Buffer.from(network.body, "base64").toString(), /"url":"http:\/\/127\.0\.0\.1:4192\/"/);
+  } finally {
+    await rm(spec, { force: true });
+    await rm(path.join(root, "zz-results.json"), { force: true });
+  }
 });

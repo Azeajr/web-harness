@@ -10,6 +10,7 @@ import {
   realpath,
   appendFile,
   rm,
+  stat,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { availableParallelism } from "node:os";
@@ -24,6 +25,7 @@ import {
   LABEL_TOKEN,
   availablePort,
   acquirePortLease,
+  commands,
   releasePortLease,
   reviewUrl,
   serverIdentity,
@@ -56,6 +58,18 @@ import {
   scanOverlayOverflow,
 } from "./browser.mjs";
 import { batchSource } from "./batch.mjs";
+import { checkExpectation, diffValues, readWatched, settle, stableObservation } from "./effect.mjs";
+import {
+  captureStorage,
+  installEvidence,
+  mergeTimeline,
+  pushRing,
+  redactUrl,
+  sliceRing,
+  summarizeFailure,
+  toJsonl,
+} from "./evidence.mjs";
+import { observe, readState } from "./inspect.mjs";
 import { functionSource, loadConfig } from "./config.mjs";
 import { checkBudget, describeBudget, formatSize, parseSize } from "./resources.mjs";
 import { describeDrift, versionDrift } from "./versions.mjs";
@@ -80,7 +94,21 @@ if (!/^[1-9]\d{1,4}$/.test(serverHeapMb))
 const isModalBusy = (error) => /does not handle the modal state/i.test(error.message);
 
 // Page-side helpers shipped with every run-code that classifies faults.
-const faultLib = `{ consoleKind: ${consoleKind}, describeConsole: ${describeConsole}, isExternal: ${isExternal}, isUnserved: ${isUnserved}, isUnservedLoad: ${isUnservedLoad}, failures: ${failures}, STUB_EXTERNAL: ${JSON.stringify(STUB_EXTERNAL)} }`;
+const faultLib = `{ consoleKind: ${consoleKind}, describeConsole: ${describeConsole}, isExternal: ${isExternal}, isUnserved: ${isUnserved}, isUnservedLoad: ${isUnservedLoad}, failures: ${failures}, STUB_EXTERNAL: ${JSON.stringify(STUB_EXTERNAL)}, installEvidence: ${installEvidence}, pushRing: ${pushRing}, redactUrl: ${redactUrl} }`;
+
+// Lifecycle commands the Playwright CLI must never run on the controller's behalf.
+const LIFECYCLE_CLI = ["open", "attach", "close", "detach", "delete-data", "close-all", "kill-all", "install", "install-browser", "tracing-start", "tracing-stop"];
+
+export function assertCliAllowed(args) {
+  if (!args.length) throw new Error("cli requires a Playwright command. Try cli snapshot.");
+  if (
+    args.some((arg) => /^(?:-s(?:=|$)|--(?:session|persistent|profile|config)(?:=|$))/.test(arg)) ||
+    LIFECYCLE_CLI.includes(args[0])
+  )
+    throw new Error(
+      "Use controller start/restart/reset/stop for session lifecycle, and run --trace for traces; CLI cannot override its session, profile or tracing.",
+    );
+}
 
 export async function main(argv) {
   const config = await loadConfig();
@@ -99,6 +127,7 @@ export async function main(argv) {
   let interrupted = false;
   let structuredOutput = false;
   const commandStarted = performance.now();
+  const commandStartedAt = new Date().toISOString();
   const transport = { calls: 0, ms: 0 };
   for (const signal of ["SIGINT", "SIGTERM"])
     process.once(signal, () => {
@@ -126,7 +155,12 @@ Usage: web-harness [--session NAME] <command> [options]
   cli <args...>   Run arbitrary Playwright CLI commands inside the owned session
   observe SELECTOR  Inspect a targeted region as compact JSON (up to five matches)
   state           Read the app's development state accessor as compact JSON (dev target only)
-  run REPO_FILE   Batch trusted async (page, {step, assert, observe, state}) => {...}; JSON result
+  run REPO_FILE [--trace off|retain-on-failure|keep]
+                  Batch trusted async (page, {step, assert, observe, state, effect, allowFault,
+                  expectFault}) => {...}; JSON result; a failure keeps a bundle (network, console,
+                  accessibility tree, storage, state, timeline, trace when on)
+  effect [--observe SEL]... [--state a,b] [--durable] [--until SEL] [--expect change|none] -- <cli command>
+                  Read what is watched, run one CLI action, settle, read again: JSON diff
 
 Start/preflight: --target dev|production (default dev) --fixture NAME
   --browser ${config.defaults.browser} --device "${config.defaults.device}"
@@ -134,7 +168,8 @@ Start/preflight: --target dev|production (default dev) --fixture NAME
   --url URL (dev only: identity-verified existing localhost server; never stopped) --route /
   --setup REPO_FILE (trusted async page => {...} returning JSON postconditions)
   --workflow SLUG --output DIRECTORY (default .web-harness; repeat for later commands)
-  --force-resources (start although the memory budget refuses; recorded in the manifest)${config.options.length ? `\n  Project options: ${config.options.map((name) => `--${name}`).join(" ")}` : ""}
+  --force-resources (start although the memory budget refuses; recorded in the manifest)
+  --trace MODE (default for every run in this session)${config.options.length ? `\n  Project options: ${config.options.map((name) => `--${name}`).join(" ")}` : ""}
 Fixtures:
 ${fixtures}
 Reset refuses changed fixture/setup digests; use stop/start to establish a changed baseline.
@@ -268,21 +303,164 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
   const stateSpec = () =>
     `{ sections: ${JSON.stringify(config.state.sections)}, defaults: ${JSON.stringify(config.state.defaults)}, target: ${JSON.stringify(manifest.target)}, read: ${config.state.read ? functionSource(config.state.read, "state.read") : "null"} }`;
 
-  async function structuredCommand(command, positional) {
+  const durableSource = () =>
+    config.durable?.read ? functionSource(config.durable.read, "durable.read") : "null";
+
+  async function readEvents(since) {
+    try {
+      const text = await readFile(path.join(path.dirname(manifestPath), "events.jsonl"), "utf8");
+      return text
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((entry) => entry.at >= since && entry.runId === manifest.runId);
+    } catch {
+      return [];
+    }
+  }
+
+  // A failure bundle: everything needed to explain a failure without replaying it. `captured` is
+  // what the browser side returned (rings, accessibility tree, storage); files the browser wrote
+  // itself (screenshot, trace) are indexed where they landed.
+  async function writeBundle(directory, { captured, steps = [], faults = [], state, since, tags, artifactErrors = [] }) {
+    await mkdir(directory, { recursive: true });
+    const files = [];
+    const write = async (name, content, extra = {}) => {
+      await writeFile(path.join(directory, name), content);
+      files.push({ name, bytes: Buffer.byteLength(content), ...extra });
+    };
+    const network = captured?.network ?? { entries: [], dropped: 0 };
+    const consoleRing = captured?.console ?? { entries: [], dropped: 0 };
+    await write("network.jsonl", toJsonl(network.entries), { dropped: network.dropped });
+    await write("console.jsonl", toJsonl(consoleRing.entries), { dropped: consoleRing.dropped });
+    if (captured?.aria) await write("aria.yml", captured.aria);
+    if (captured?.storage) await write("storage.json", JSON.stringify(captured.storage, null, 2) + "\n");
+    if (state !== undefined && state !== null) await write("state.json", JSON.stringify(state, null, 2) + "\n");
+    const counted = failures(faults, config.policy);
+    await write(
+      "faults.json",
+      JSON.stringify({ records: faults.map((record) => ({ ...record, counted: counted.includes(record) })) }, null, 2) + "\n",
+    );
+    const timeline = mergeTimeline(
+      { events: await readEvents(since), steps, faults, console: consoleRing.entries, requests: network.entries },
+      tags,
+    );
+    await write("timeline.jsonl", toJsonl(timeline));
+    for (const name of ["screenshot.png", "trace.zip"]) {
+      const info = await stat(path.join(directory, name)).catch(() => null);
+      if (info) files.push({ name, bytes: info.size });
+    }
+    const summary = summarizeFailure({
+      faults,
+      requests: network.entries,
+      console: consoleRing.entries,
+      storage: captured?.storage,
+      url: captured?.url,
+    });
+    await write(
+      "index.json",
+      JSON.stringify(
+        {
+          ...tags,
+          summary,
+          files,
+          captureErrors: artifactErrors,
+          privateData: files.some((file) => file.name === "trace.zip")
+            ? "trace.zip holds request and response bodies and headers; keep it local."
+            : null,
+          note: "Captures are sequential: the screenshot, state and storage reads are not one atomic moment.",
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return { directory, summary };
+  }
+
+  // A bundle for a failure outside a batch (a failed check, start, restart or reload).
+  let failureBundled = false;
+  async function captureFailure(reason, faults = []) {
+    manifest.failures = (manifest.failures ?? 0) + 1;
+    const directory = path.join(manifest.runDir, `failure-${manifest.failures}`);
+    await mkdir(directory, { recursive: true });
+    const errors = [];
+    let captured = null;
+    try {
+      captured = await code(
+        async (page, dir, lib) => {
+          const out = { url: page.url() };
+          const evidence = page.context().__webHarnessEvidence;
+          try {
+            await page.screenshot({ path: `${dir}/screenshot.png`, timeout: 5000, scale: "css" });
+          } catch (error) {
+            out.screenshotError = error.message;
+          }
+          try {
+            out.aria = await page.locator("body").ariaSnapshot({ timeout: 5000 });
+          } catch (error) {
+            out.ariaError = error.message;
+          }
+          try {
+            out.storage = await lib.captureStorage(page);
+          } catch (error) {
+            out.storageError = error.message;
+          }
+          if (evidence) {
+            out.network = { entries: evidence.requests.entries.slice(-200), dropped: evidence.requests.dropped };
+            out.console = { entries: evidence.console.entries.slice(-200), dropped: evidence.console.dropped };
+          }
+          return out;
+        },
+        directory,
+        `{ captureStorage: ${captureStorage} }`,
+      );
+      for (const key of ["screenshotError", "ariaError", "storageError"])
+        if (captured[key]) errors.push(`${key}: ${captured[key]}`);
+    } catch (error) {
+      errors.push(`capture: ${error.message}`);
+    }
+    const written = await writeBundle(directory, {
+      captured,
+      faults,
+      since: commandStartedAt,
+      tags: { runId: manifest.runId, reason },
+      artifactErrors: errors,
+    });
+    await save();
+    await event("failure-bundle", { reason, directory });
+    return written;
+  }
+
+  async function printStructured(report, fallback) {
+    const output = JSON.stringify(report);
+    console.log(output.length <= 16000 ? output : JSON.stringify({ ...fallback, outputTruncated: true }));
+    if (!report.ok) process.exitCode = 1;
+  }
+
+  async function structuredCommand(command, positional, options) {
     const id = `batch-${randomUUID()}`;
     const base = path.join(manifest.runDir, id);
+    await mkdir(base, { recursive: true });
     const sourcePath = command === "run" ? await resolvePath(root, positional[0]) : null;
     const source = sourcePath
       ? await readFile(sourcePath, "utf8")
       : command === "observe"
         ? `async (page, { observe }) => observe(${JSON.stringify(positional[0])})`
         : "async (page, { state }) => state()";
-    const wrapped = batchSource(source, base, { stateSpec: stateSpec(), policy: config.policy });
-    await writeFile(`${base}.source.js`, source);
-    await writeFile(`${base}.js`, wrapped);
+    const sourceDigest = digest(source);
+    const trace = command === "run" ? (options.trace ?? manifest.trace ?? config.evidence.trace) : "off";
+    const wrapped = batchSource(source, base, {
+      stateSpec: stateSpec(),
+      policy: config.policy,
+      durable: durableSource(),
+      trace,
+      batchId: id,
+    });
+    await writeFile(path.join(base, "source.js"), source);
+    await writeFile(path.join(base, "wrapped.js"), wrapped);
     let report;
     try {
-      report = await cli(["run-code", `--filename=${base}.js`], { raw: true });
+      report = await cli(["run-code", `--filename=${path.join(base, "wrapped.js")}`], { raw: true });
       await health();
     } catch (error) {
       // Transport/server failures must remain failures even when browser-side work succeeded.
@@ -293,49 +471,121 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         controllerError: error.message,
       };
     }
+    const captured = report.bundle ?? null;
+    delete report.bundle;
+    let checked = null;
     if (!report.ok) {
       try {
-        await check({ throwOnFault: false });
+        checked = await check({ throwOnFault: false });
         report.faultsReport = path.join(manifest.runDir, "faults.json");
       } catch (error) {
         report.diagnosticsError = error.message;
       }
+      try {
+        const written = await writeBundle(path.join(base, "bundle"), {
+          captured,
+          steps: report.steps,
+          faults: checked?.all ?? report.faults ?? [],
+          state: report.artifacts?.state,
+          since: commandStartedAt,
+          tags: { runId: manifest.runId, batchId: id },
+          artifactErrors: report.artifactErrors,
+        });
+        report.bundle = written.directory;
+        report.summary = { ...written.summary, bundle: written.directory };
+      } catch (error) {
+        report.diagnosticsError = [report.diagnosticsError, `bundle: ${error.message}`].filter(Boolean).join("; ");
+      }
+    }
+    if (command === "run") {
+      // A rerun of the same source in the same run is another attempt; a later pass does not
+      // erase the earlier failure.
+      const prior = (manifest.attempts ?? []).filter((attempt) => attempt.sourceDigest === sourceDigest);
+      report.attempt = prior.length + 1;
+      report.priorAttempts = prior.map(({ batchId, ok, error }) => ({ batchId, ok, error }));
+      manifest.attempts = [
+        ...(manifest.attempts ?? []),
+        { batchId: id, sourceDigest, ok: report.ok, error: report.error ?? null, at: new Date().toISOString() },
+      ];
+      await save();
     }
     report = {
       ...report,
       runId: manifest.runId,
+      batchId: id,
       target: manifest.target,
       source: sourcePath,
-      sourceDigest: digest(source),
-      report: `${base}.json`,
+      sourceDigest,
+      trace,
+      report: path.join(base, "report.json"),
       timing: {
         totalMs: Math.round(performance.now() - commandStarted),
         transportCalls: transport.calls,
         transportMs: Math.round(transport.ms),
       },
     };
-    await writeFile(`${base}.json`, JSON.stringify(report, null, 2) + "\n");
+    await writeFile(path.join(base, "report.json"), JSON.stringify(report, null, 2) + "\n");
     await event("batch-completed", {
       command,
+      batchId: id,
       ok: report.ok,
       report: report.report,
       timing: report.timing,
     });
-    const output = JSON.stringify(report);
-    console.log(
-      output.length <= 16000
-        ? output
-        : JSON.stringify({
-            ok: report.ok,
-            error: report.error,
-            runId: report.runId,
-            report: report.report,
-            timing: report.timing,
-            outputTruncated: true,
-            screenshot: report.artifacts?.screenshot ?? null,
-          }),
+    await printStructured(report, {
+      ok: report.ok,
+      error: report.error,
+      runId: report.runId,
+      batchId: id,
+      attempt: report.attempt,
+      summary: report.summary ?? null,
+      report: report.report,
+      timing: report.timing,
+      screenshot: report.artifacts?.screenshot ?? null,
+    });
+  }
+
+  // `effect ... -- <cli command>`: read what is watched, run one Playwright CLI action, settle,
+  // read again, diff. The batch helper of the same name does this inside a journey.
+  async function effectCommand(positional, watch) {
+    assertCliAllowed(positional);
+    const lib = `{ observe: ${observe}, readState: ${readState}, stateSpec: ${stateSpec()}, durable: ${durableSource()}, stableObservation: ${stableObservation} }`;
+    const read = () => code(readWatched, watch, lib);
+    const mark = await code(async (page) => page.context().__webHarnessEvidence?.seq ?? 0);
+    const before = await read();
+    let actionError = null;
+    let actionOutput = "";
+    try {
+      actionOutput = await cli(positional);
+    } catch (error) {
+      actionError = error.message;
+    }
+    const settled = await code(
+      async (page, arg, helpers) => helpers.settle(page, arg.mark, arg.timeout, arg.until),
+      { mark, timeout: 5000, until: watch.until },
+      `{ settle: ${settle} }`,
     );
-    if (!report.ok) process.exitCode = 1;
+    const after = await read();
+    const diff = diffValues(before.values, after.values, { entries: 50, value: 200 });
+    const problem =
+      actionError ?? checkExpectation("effect", watch.expect ?? undefined, diff, before, after);
+    const id = `effect-${randomUUID()}`;
+    const report = {
+      ok: !problem,
+      error: problem,
+      action: positional,
+      actionOutput: actionOutput.slice(0, 2000),
+      settled,
+      ...diff,
+      unsupported: [...new Set([...before.unsupported, ...after.unsupported])],
+      before: before.at,
+      after: after.at,
+      runId: manifest.runId,
+      report: path.join(manifest.runDir, `${id}.json`),
+    };
+    await writeFile(report.report, JSON.stringify(report, null, 2) + "\n");
+    await event("effect-completed", { ok: report.ok, report: report.report, changed: diff.changedCount });
+    await printStructured(report, { ok: report.ok, error: report.error, report: report.report, changedCount: diff.changedCount });
   }
 
   async function prepareFixture(options) {
@@ -587,6 +837,8 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       { outside: true },
     );
     manifest.sequence = 0;
+    manifest.attempts = [];
+    manifest.failures = 0;
     await mkdir(manifest.runDir, { recursive: true });
     await writeFile(
       path.join(manifest.runDir, "review.md"),
@@ -703,9 +955,15 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       console.log(
         `${faults.length} fault(s), ${collected.warnings?.length ?? 0} warning(s): ${report}`,
       );
-    if (faults.length && throwOnFault)
-      throw new Error(faults.map((fault) => `${fault.kind}: ${fault.detail}`).join("\n"));
-    return { records: collected.records ?? [], faults };
+    if (faults.length && throwOnFault) {
+      const bundle = await captureFailure("check", records).catch(() => null);
+      failureBundled = Boolean(bundle);
+      throw new Error(
+        faults.map((fault) => `${fault.kind}: ${fault.detail}`).join("\n") +
+          (bundle ? `\nFailure bundle: ${bundle.directory}` : ""),
+      );
+    }
+    return { records: collected.records ?? [], all: records, faults };
   }
 
   // Open the session's browser on its persistent profile and install the fault policy before any
@@ -728,6 +986,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         identityUrl: new URL(IDENTITY_PATH, manifest.seed.url).href,
         identity: manifest.identity,
         policy: config.policy,
+        evidence: config.evidence,
         initScript: config.initScript ? functionSource(config.initScript, "initScript") : null,
       },
       faultLib,
@@ -880,7 +1139,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     const { command, options, positional } = parseArgs(argv, {
       extraValueOptions: config.options,
     });
-    structuredOutput = ["run", "observe", "state"].includes(command);
+    structuredOutput = ["run", "observe", "state", "effect"].includes(command);
     if (command === "help" || options.help) return help();
     const session = slug(options.session ?? config.name);
     const output = await resolvePath(root, options.output ?? ".web-harness", {
@@ -931,6 +1190,8 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         seed,
         options,
         workflow: slug(options.workflow ?? "review", "workflow"),
+        // Default for `run` in this session; `run --trace` overrides it per batch.
+        trace: options.trace ?? null,
         status: "starting",
         server: null,
         containerId: null,
@@ -1064,7 +1325,8 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       throw error;
     }
     await event("command", { command, args: positional });
-    if (structuredOutput) return structuredCommand(command, positional);
+    if (command === "effect") return effectCommand(positional, options.watch);
+    if (structuredOutput) return structuredCommand(command, positional, options);
     if (command === "reset") {
       const seed = await prepareFixture(manifest.options);
       if (seed.digest !== manifest.seed.digest)
@@ -1087,28 +1349,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     else if (command === "screenshot") await screenshot(positional[0] ?? "state", options);
     else if (command === "check") await check();
     else if (command === "cli") {
-      if (!positional.length)
-        throw new Error("cli requires a Playwright command. Try cli snapshot.");
-      if (
-        positional.some((arg) =>
-          /^(?:-s(?:=|$)|--(?:session|persistent|profile|config)(?:=|$))/.test(arg),
-        ) ||
-        [
-          "open",
-          "attach",
-          "close",
-          "detach",
-          "delete-data",
-          "close-all",
-          "kill-all",
-          "install",
-          "install-browser",
-        ].includes(positional[0])
-      ) {
-        throw new Error(
-          "Use controller start/restart/reset/stop for session lifecycle; CLI cannot override its session or profile.",
-        );
-      }
+      assertCliAllowed(positional);
       console.log(await cli(positional));
     }
     await health();
@@ -1120,6 +1361,19 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     if (structuredOutput) console.log(JSON.stringify({ ok: false, error: error.message }));
     else console.error(error.message);
     if (manifest?.runDir) await event("command-failed", { message: error.message });
+    // A lifecycle command that failed with the browser still up leaves a bundle too (a failed
+    // check already wrote one). Never masks the original error.
+    if (
+      manifest?.runDir &&
+      manifest.containerId &&
+      !failureBundled &&
+      !interrupted &&
+      !structuredOutput &&
+      ["start", "restart", "reset", "reload"].includes(argv.find((arg) => commands.includes(arg)))
+    ) {
+      const bundle = await captureFailure("command-failed").catch(() => null);
+      if (bundle) console.error(`Failure bundle: ${bundle.directory}`);
+    }
     if (creating && manifest)
       await cleanup().catch((failure) => console.error(`Cleanup failed: ${failure.message}`));
     process.exitCode = 1;
