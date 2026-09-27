@@ -24,8 +24,6 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 | ID | Item | Size | Milestone |
 |---|---|---|---|
 | [A5](#a5-record-a-batch-from-cli-actions) | Record a batch from CLI actions (optional) | S | M4 follow-up |
-| [G2](#g2-reusable-extended-workflow) | Reusable extended workflow (scheduled) | M | M5 |
-| [H3](#h3-measure-the-harness-itself) | Measure the harness itself | M | M5 |
 
 ## Milestones
 
@@ -44,7 +42,9 @@ every `uses:` reference together (README, "Released by tag").
 - **M4 — Agent ergonomics** shipped: the agent skill with `describe` and `skill install` (A2),
   `promote` with `applyHarnessFixture` and `batchHelpers` (A3), and the accessibility scan (A4).
   One optional follow-up remains (A5).
-- **M5 — Extended tier and measurement.** Scheduled coverage and harness performance baselines.
+- **M5 — Extended tier and measurement** shipped: the reusable scheduled workflow with
+  `mutation-score` (G2), and phase timings, peak memory and `bench` (H3). Proving G2 on a real
+  schedule is consumer work (Appendix A).
 
 ---
 
@@ -67,73 +67,6 @@ under `web-harness e2e`.
 
 ---
 
-## M5 — Extended tier and measurement
-
-### G2. Reusable extended workflow
-
-**Why.**
-- The design review's extended tier: "browser/device matrix, fault/recovery, heavy data, stress,
-  mutation — selected PRs plus scheduled/release coverage; failures visible and triaged."
-- Its chorequest section: "CI runs plain unit tests, not its coverage/mutation scripts."
-
-**Today.**
-- `web-harness mutate` exists and runs in a throwaway copy (`src/mutate.mjs:9-12`).
-- training-log and chorequest define `test:mutation`, but no consumer runs it on a schedule.
-- No timezone variants of the browser suite run anywhere (see P1).
-- There is no device matrix beyond each suite's own projects.
-
-**Design.**
-- `.github/workflows/extended.yml` with `on: workflow_call` and these inputs:
-  - `mutation` (bool) and `mutation-threshold` (number; fail below it);
-  - `timezones` (a JSON list; runs `web-harness e2e --timezone X` for each, needs P1);
-  - `projects` (a JSON list of Playwright projects);
-  - `node-version`.
-- Jobs: `mutation` (upload the Stryker report, compare its score with the threshold) and
-  `e2e-matrix`.
-- Triage: on a scheduled failure, open or update one issue per consumer titled "extended: <job>
-  failing" through `gh` (needs `issues: write`), and close it on the next green run. Failures are
-  visible without being a required check.
-- A consumer adds about ten lines: `on: { schedule: [{ cron: … }], workflow_dispatch: {} }` and
-  `uses: Azeajr/web-harness/.github/workflows/extended.yml@vX`.
-
-**Acceptance.** training-log runs it nightly for a week with a mutation report artifact each night.
-A threshold set above the current score fails the run and opens the issue; the next green run
-closes it.
-
-**Open question.** Runner minutes. chorequest is private on a free plan: 2,000 minutes a month and
-2-core runners. Schedule it weekly there, and measure a run first.
-
-### H3. Measure the harness itself
-
-**Why.** Design review section F: "Measure equivalent scenarios: startup, warm
-interaction/inspection, reset, persistent restart, end-to-end journey, output volume, peak memory
-and CPU … derive budgets from measurements rather than arbitrary universal targets."
-
-**Today.**
-- A batch reports `totalMs`, `transportCalls`, `transportMs` (`src/controller.mjs:307-311`) and
-  `executionMs` (`src/batch.mjs:50`).
-- `start`, `restart` and `reset` are not timed.
-- Memory and CPU are not sampled.
-
-**Design.**
-- Phase timings in the manifest (P2 `timings`), and in `events.jsonl` for `restart` and `reset`.
-- At the end of each command, a peak-memory sample: `docker stats --no-stream` for the owned
-  container, and the server's `VmHWM` from `/proc/<pid>/status`. Recorded in `events.jsonl` as
-  `metrics`.
-- `web-harness bench [--repeat 5]` runs a fixed sequence on the current project:
-  1. `start`;
-  2. three `state` reads done separately, then the same three in one batch (the batching claim,
-     measured);
-  3. `reload`, `restart`, `reset`;
-  4. `stop`.
-  It prints the median and p90 per step with the conditions (host cores and memory, image,
-  Playwright version, target). No budgets until there are baselines.
-
-**Acceptance.** `bench` on `examples/minimal` produces repeated samples and conditions. The manifest
-of a normal session carries phase timings and the peak memory of both processes.
-
----
-
 ## Appendix A — Consumer follow-ups (not web-harness work)
 
 Kept here so they are not lost. Each happens in the consumer's own repository, through a PR.
@@ -149,6 +82,12 @@ Kept here so they are not lost. Each happens in the consumer's own repository, t
   the smoke's `a11y` phase; start with `impact: 'critical'` and tighten.
 - **Promote.** Set `e2e.fixtures` where the fixtures module is not `tests/e2e/fixtures.ts`.
 - **Update-flow hooks.** Each consumer adds `smoke.update.prompt`/`accept` for its own prompt (O1).
+- **Extended tier.** training-log adopts `extended.yml` nightly with `mutation: true` and a
+  threshold (it needs Stryker's `json` reporter), and checks that a threshold above its score
+  opens the issue and the next green run closes it — the proof G2 still needs. chorequest (private,
+  2,000 free minutes) runs it weekly after measuring one run.
+- **Baselines.** Run `web-harness bench` in each consumer on the machines that matter and record
+  the numbers before setting any budget.
 - **Environment.** chorequest moves its clock pin from `apply` into `environment` (P1).
   training-log should decide its timezone variants (sessions and cycles are date-driven).
 - **chorequest branch protection.** Unavailable: a private repository on the free plan. The
@@ -212,17 +151,17 @@ For orientation, and so that nobody re-implements these:
 | C | retries as attempts | built |
 | C | reconcile before replaying after an unknown outcome | built (`reconcile`, `--after-unknown`) |
 | D | named fixtures through real import paths | built (adapter `fixtures`; in tests, `applyHarnessFixture`) |
-| D | clock / locale / timezone, DST variants | built (`environment`, batch `clock`); variants run by **G2** |
+| D | clock / locale / timezone, DST variants | built (`environment`, batch `clock`; `extended.yml` `timezones`) |
 | D | one fault policy; expected faults local, counted, missing ones fail | built, in tests and batches |
 | D | infrastructure vs application failure by source | built (`infrastructure_failed` by source) |
 | E | production tier: SW update flows | built (smoke `update` phase) |
 | E | production tier: offline/reconnect, security headers | built (`offline`, `online`, header value rules) |
-| E | extended tier on a schedule | **G2** |
+| E | extended tier on a schedule | built (`.github/workflows/extended.yml`); adoption in Appendix A |
 | E | always-reporting aggregate verdict; deploy consumes the validated artifact | built |
 | E | fail on focused-only tests | built (`harnessPlaywright`) |
-| E | mutation in isolation | built; scheduling → **G2** |
+| E | mutation in isolation | built, scheduled by `extended.yml` with a score threshold |
 | F | warm session, batching, narrow state, build once | built |
-| F | measure equivalent scenarios | **H3** |
+| F | measure equivalent scenarios | built (manifest `timings`/`metrics`, `bench`) |
 | F | bound container and host separately | built, with the memory budget |
 | Delivery 1 | controller acceptance in CI | built (`test/acceptance`, required in CI) |
 | Delivery 2 | production restart journey | built; automated in `test/acceptance` |

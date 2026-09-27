@@ -25,6 +25,8 @@ Every piece below serves a step of that loop. Where a piece cannot prove somethi
 | `web-harness e2e` | regress | The project's suite in the pinned image; the one place pixel baselines are compared. |
 | `web-harness scenarios` | ship | Each critical journey maps to a test that exists and (with results) passed — or says why not — for a named source and build. |
 | `web-harness mutate` | regress | Stryker in a throwaway copy of the tree; never rewrites the checkout. |
+| `extended.yml`, `mutation-score` | regress | Scheduled mutation and timezone/project E2E runs; failures open an issue, not a required check. |
+| `bench`, manifest `metrics` | measure | Timings and peak memory of this host, image and project — conditions recorded, not universal budgets. |
 | `scope` / `setup` / `verdict` actions | ship | The required check always reports, and a skipped required lane fails it. |
 
 ## Adapter: `harness.config.mjs`
@@ -358,6 +360,32 @@ scope → checks (lint, typecheck, coverage, build → dist artifact + digest)
 - **`deploy`** ships the digest-checked artifact that `checks` built and `smoke` proved. It does
   not wait for E2E, which is already required to merge; a flaky browser test cannot block a release
   of already-verified bytes.
+
+## Extended tier
+
+`.github/workflows/extended.yml` is a reusable workflow a consumer calls on a schedule (see the
+README). Inputs: `mutation` with `mutation-threshold` and `mutation-command` (default
+`web-harness mutate`; Stryker needs its `json` reporter for the score), `timezones` and `projects`
+(JSON lists; the container E2E suite runs once per combination), `node-version`, and `triage`. It
+is never a required check: on a scheduled failure it opens — or comments on — one issue titled
+"extended: scheduled coverage failing", and closes it on the next green run. Run it on
+`workflow_dispatch` first to measure its minutes; a private repository's free plan has 2,000 a
+month.
+
+## Measuring the harness
+
+Every `start` records per-phase timings in the manifest; `restart`, `reset` and `reload` record
+theirs too (the latest in `timings`, each one as a `timing` event). After every command the
+manifest's `metrics` holds the browser container's peak memory (its cgroup `memory.peak`, or the
+current usage from `docker stats` where there is no peak counter, and says which) and the owned
+server's peak resident set (`VmHWM`) alone and with its descendants.
+
+`web-harness bench [--repeat 5]` runs one fixed sequence per repetition — `start`, three `state`
+reads as separate commands, the same three in one batch, `reload`, `restart`, `reset`, `stop` —
+and prints the median and p90 of each step with the conditions (host cores and memory, image,
+Playwright, browser and device, target), writing everything, peaks included, to
+`.web-harness/bench/`. Compare "3 separate states" with "batch of 3 states" to see what batching
+saves. No budgets are set until baselines exist; derive them from these numbers.
 
 ## Limits
 

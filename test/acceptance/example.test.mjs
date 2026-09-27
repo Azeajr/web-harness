@@ -28,7 +28,7 @@ before(async () => {
 });
 
 after(async () => {
-  for (const session of ["accept", "prod", "interrupt", "env", "clock"])
+  for (const session of ["accept", "prod", "interrupt", "env", "clock", "bench"])
     await example?.harness(["--session", session, "stop"]).catch(() => {});
   await example?.cleanup();
 });
@@ -125,6 +125,15 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.equal(result.code, 0, result.stderr + result.stdout.slice(-2000));
     const state = lastJson((await session(["state"])).stdout);
     assert.equal(state.result.note.text, "from a batch");
+    // Timed and measured: the restart's duration, and both processes' peak memory so far.
+    const current = await manifest();
+    assert.ok(current.timings.restart > 0, JSON.stringify(current.timings));
+    assert.ok(current.metrics.container.bytes > 0, JSON.stringify(current.metrics));
+    assert.ok(current.metrics.server.vmHwmKb > 0, JSON.stringify(current.metrics));
+    assert.ok(current.metrics.server.treeVmHwmKb >= current.metrics.server.vmHwmKb);
+    const events = (await readFile(path.join(root, ".web-harness/accept/events.jsonl"), "utf8")).split("\n").filter(Boolean).map(JSON.parse);
+    assert.ok(events.some((entry) => entry.kind === "timing" && entry.command === "restart"));
+    assert.ok(events.some((entry) => entry.kind === "metrics" && entry.command === "state"));
   });
 
   await t.test("effect passes a real change and a cancel, and fails the quiet no-op", async () => {
@@ -400,6 +409,23 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.deepEqual(report.result, { now: "2026-03-08T07:31:00.000Z", timeZone: "Pacific/Kiritimati" });
     assert.equal((await clock(["stop"])).code, 0);
   });
+});
+
+test("bench: repeated samples of a fixed sequence, with the conditions they were taken under", { timeout: 10 * 60_000 }, async () => {
+  const { harness } = example;
+  const result = await harness(["bench", "--repeat", "2", "--port", "4194", "--fixture", "blank"]);
+  assert.equal(result.code, 0, result.stderr.slice(-3000) + result.stdout.slice(-2000));
+  const file = /Report: (.+\.json)/.exec(result.stdout)?.[1];
+  assert.ok(file, result.stdout);
+  const report = JSON.parse(await readFile(file, "utf8"));
+  for (const step of ["start", "state 1", "batch of 3 states", "3 separate states", "reload", "restart", "reset", "stop"]) {
+    assert.equal(report.steps[step].samples.length, 2, step);
+    assert.ok(report.steps[step].median > 0, step);
+  }
+  assert.equal(report.conditions.image, "mcr.microsoft.com/playwright:v1.63.0-noble");
+  assert.ok(report.conditions.host.cores > 0);
+  assert.ok(report.peaks.every((peak) => peak?.container?.bytes > 0));
+  assert.match(result.stdout, /batch of 3 states\s+\d+\s+\d+/);
 });
 
 test("smoke: passes the example build, and fails each broken variant in the right phase", { timeout: 10 * 60_000 }, async (t) => {

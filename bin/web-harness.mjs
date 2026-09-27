@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Entry point. Tooling commands (serve, smoke, e2e, mutate, scenarios, digest, skill, promote) are
-// one-shot; everything else is the session controller.
+// Entry point. Tooling commands (serve, smoke, e2e, mutate, scenarios, digest, skill, promote,
+// bench, mutation-score) are one-shot; everything else is the session controller.
 import { toolCommands } from "../src/core.mjs";
 
 const [command, ...rest] = process.argv.slice(2).filter((arg, index) => index > 0 || arg !== "--");

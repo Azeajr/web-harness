@@ -71,6 +71,20 @@ web-harness mutate [stryker args]                                    (mutation, 
 web-harness scenarios [--results playwright.json] [--lane NAME=REPORT] [--allow-flaky]
                                                                      (scenario inventory)
 web-harness digest DIR [--expect SHA]                                (build content digest)
+web-harness mutation-score [REPORT.json] [--min N]                   (Stryker score, threshold)
+web-harness bench [--repeat 5] [--port P] [--fixture F]              (harness timings, memory)
+```
+
+Scheduled extended tier (mutation, E2E in other timezones or projects; failures open an issue):
+
+```yaml
+# .github/workflows/extended.yml in a consumer
+on: { schedule: [{ cron: '17 5 * * *' }], workflow_dispatch: {} }
+permissions: { contents: read, issues: write }
+jobs:
+  extended:
+    uses: Azeajr/web-harness/.github/workflows/extended.yml@v0.1.4
+    with: { mutation: true, mutation-threshold: 60, timezones: '["America/New_York", "Pacific/Kiritimati"]' }
 ```
 
 ## Development
@@ -95,7 +109,8 @@ Released by tag. Consumers pin a tag in both the dependency and the `uses:` refe
 together (`web-harness doctor` warns when a workflow's `uses:` differs from the installed version).
 
 1. Merge to `main` with `verdict` green (it includes the acceptance suite).
-2. Bump `version` in `package.json`, and every `#vX.Y.Z` / `@vX.Y.Z` in this README.
+2. Bump `version` in `package.json`, every `#vX.Y.Z` / `@vX.Y.Z` in this README, and the
+   `setup@vX.Y.Z` references in `.github/workflows/extended.yml` (a unit test holds them equal).
 3. Tag `vX.Y.Z` on the merge commit and push the tag.
 4. In each consumer: bump the dependency and every `uses: Azeajr/web-harness/...@vX.Y.Z` in one PR.
 
