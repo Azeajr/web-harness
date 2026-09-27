@@ -12,6 +12,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { availableParallelism } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -64,7 +65,8 @@ const serverEntry = await realpath(path.join(here, "server.mjs"));
 // This stays an argv entry: the PID, start time, cwd and entry that ownsProcess matches on are
 // unchanged. It bounds the V8 heap only; esbuild and other children are not covered.
 const containerMemory = process.env.WEB_HARNESS_DOCKER_MEMORY ?? "3g";
-const containerCpus = process.env.WEB_HARNESS_DOCKER_CPUS ?? "2";
+const containerCpus =
+  process.env.WEB_HARNESS_DOCKER_CPUS ?? String(Math.min(2, availableParallelism()));
 const serverHeapMb = process.env.WEB_HARNESS_SERVER_HEAP_MB ?? "1024";
 if (!/^[1-9]\d{1,4}$/.test(serverHeapMb))
   throw new Error("WEB_HARNESS_SERVER_HEAP_MB must be a positive integer number of megabytes.");

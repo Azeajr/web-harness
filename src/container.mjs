@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { access, cp, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
 import { imageFor } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
@@ -55,7 +55,9 @@ export async function main(argv) {
   // A container overrun must kill the container, not the host: these bound the run well below a
   // developer machine's total memory. Playwright otherwise defaults to half the logical cores.
   const dockerMemory = process.env.WEB_HARNESS_E2E_MEMORY ?? "6g";
-  const dockerCpus = process.env.WEB_HARNESS_E2E_CPUS ?? "4";
+  // Docker refuses --cpus above the host's core count, and CI runners vary: a private repo's
+  // GitHub-hosted runner has 2 cores where a public one has 4. Clamp the default to what exists.
+  const dockerCpus = process.env.WEB_HARNESS_E2E_CPUS ?? String(Math.min(4, availableParallelism()));
   const callerSetWorkers = playwrightArgs.some(
     (arg) => arg === "--workers" || arg === "-j" || /^(--workers|-j)=/.test(arg),
   );

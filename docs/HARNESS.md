@@ -51,6 +51,12 @@ built-ins only. Method shorthand is fine; closures over the config file are not.
 must reach a file input is written by the controller to `dataFile` (a `file` property in the
 prepared data becomes that file's whole content).
 
+**Waiting on async page state:** poll from Node with an awaited `page.evaluate` that returns a
+boolean. `page.waitForFunction` with an async predicate is satisfied by the returned Promise even
+when it resolves to `false` — a "wait until saved" written that way silently waits for nothing.
+And never `indexedDB.open()` a database the app may not have created yet: that creates an empty
+one at version 1, and the app's own upgrade never runs.
+
 **State accessors** are development-only (`import.meta.env.DEV`), read-only (SELECT-only database
 access), bounded summaries — never raw rows, tokens or documents. The production smoke fails if a
 `__harness` or `__e2eResetDb` global ships. On the production target `state` answers `unsupported`
@@ -147,6 +153,8 @@ scope → checks (lint, typecheck, coverage, build → dist artifact + digest)
 ## Limits
 
 - Linux only (Docker host networking, `/proc` ownership checks).
+- Container CPU bounds default to at most the host's cores (Docker refuses more): 4 for E2E, 2 for
+  sessions. A private repository's GitHub-hosted runner has 2 cores.
 - Emulated WebKit is not iOS Safari; installed-PWA behaviour, locked-phone timers and OS
   notification delivery need a real device — list them as `unsupported` scenarios.
 - The static server does not run Pages Functions or `_redirects` (it refuses a build that has one).
