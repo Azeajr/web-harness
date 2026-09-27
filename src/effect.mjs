@@ -73,8 +73,9 @@ export function diffValues(before, after, limits) {
 
 // SERIALIZED. Wait until the page is quiet: no same-origin request from after `mark` still in
 // flight, then no DOM mutation for 150 ms (storage writes are invisible to the network check; their
-// render is not), then two animation frames. With `until`, a selector that must become visible
-// first — the deterministic way. Bounded; reports whether it settled rather than failing.
+// render is not). With `until`, a selector that must become visible first — the deterministic way.
+// Bounded; reports whether it settled rather than failing. Every wait is timed from Node, never by
+// the page's clock, which a batch may have paused.
 export async function settle(page, mark, timeoutMs, until) {
   const evidence = page.context().__webHarnessEvidence;
   const origin = page.url().replace(/^(https?:\/\/[^/]+).*$/, "$1");
@@ -98,29 +99,48 @@ export async function settle(page, mark, timeoutMs, until) {
     // Playwright CLI run-code has no setTimeout (nor URL or Buffer): wait through the page.
     await page.waitForTimeout(50);
   }
-  const remaining = Math.max(0, deadline - Date.now());
-  const domQuiet = await page
-    .evaluate(
-      (limit) =>
-        new Promise((resolve) => {
-          let timer;
-          const done = (value) => {
-            observer.disconnect();
-            clearTimeout(timer);
-            clearTimeout(hard);
-            requestAnimationFrame(() => requestAnimationFrame(() => resolve(value)));
-          };
-          const observer = new MutationObserver(() => {
-            clearTimeout(timer);
-            timer = setTimeout(() => done(true), 150);
-          });
-          observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-          timer = setTimeout(() => done(true), 150);
-          const hard = setTimeout(() => done(false), limit);
-        }),
-      Math.max(200, remaining),
-    )
-    .catch(() => false);
+  // DOM quiet: no mutation for 150 ms. Counted in the page, timed from here: the page's own timers
+  // and animation frames stop under an installed clock that is paused (clock.pauseAt), so a
+  // setTimeout or requestAnimationFrame in the page would wait forever.
+  const key = "__webHarnessSettle";
+  const install = () =>
+    page
+      .evaluate((name) => {
+        const state = { count: 0 };
+        state.observer = new MutationObserver(() => state.count++);
+        state.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+        window[name] = state;
+        return 0;
+      }, key)
+      .catch(() => null);
+  let domQuiet = false;
+  let last = await install();
+  let quietSince = Date.now();
+  // At least one quiet window, even when the request wait used up the budget.
+  const domDeadline = Math.max(deadline, quietSince + 200);
+  while (last !== null && Date.now() < domDeadline) {
+    await page.waitForTimeout(50);
+    const count = await page.evaluate((name) => (window[name] ? window[name].count : -1), key).catch(() => null);
+    // The page cannot be read (closed, crashed): not quiet, and no point waiting.
+    if (count === null) break;
+    if (count === -1) {
+      // A navigation replaced the document: watch the new one.
+      last = await install();
+      quietSince = Date.now();
+    } else if (count !== last) {
+      last = count;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= 150) {
+      domQuiet = true;
+      break;
+    }
+  }
+  await page
+    .evaluate((name) => {
+      window[name]?.observer.disconnect();
+      delete window[name];
+    }, key)
+    .catch(() => null);
   return quiet && domQuiet;
 }
 

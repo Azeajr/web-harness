@@ -143,8 +143,8 @@ It reads everything watched, runs the action as a step, settles, reads again, an
 bounded diff (`changed` paths with before and after, `unchanged` count) in the report's `effects`.
 `expect: 'change'` fails the quiet no-op — the click that did nothing — and `'none'` fails a cancel
 or a disabled control that changed something. Without `settle`, it waits for same-origin requests
-started by the action to finish, then for 150 ms without DOM mutations, then two animation frames,
-at most 5 s, and reports `settled: false` rather than failing when it runs out. Storage writes are
+started by the action to finish, then for 150 ms without DOM mutations (timed from Node, so a
+paused page clock cannot stall it), at most 5 s, and reports `settled: false` rather than failing when it runs out. Storage writes are
 invisible to the network check; pass `settle` (or `--until SELECTOR` on the command) when a
 completion signal exists.
 

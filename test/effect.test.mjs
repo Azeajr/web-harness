@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkExpectation, diffValues, stableObservation } from "../src/effect.mjs";
+import { checkExpectation, diffValues, settle, stableObservation } from "../src/effect.mjs";
 
 const limits = { entries: 50, value: 200 };
 
@@ -46,4 +46,27 @@ test("expectations catch the quiet no-op, an unwanted change, and a wrong value"
   assert.match(checkExpectation("x", { a: 3 }, moved, before, after), /x: a is 2 \(was 1\)/);
   assert.equal(checkExpectation("x", { a: (now, then) => now > then }, moved, before, after), null);
   assert.equal(checkExpectation("x", undefined, moved, before, after), null);
+});
+
+test("settling is timed from Node: a page whose own timers are frozen still settles", async () => {
+  // A paused installed clock: page-side setTimeout and requestAnimationFrame never fire. Only
+  // evaluate calls that return at once and a Node-side wait are available.
+  let mutations = 0;
+  const page = {
+    context: () => ({}),
+    url: () => "http://127.0.0.1:1/",
+    evaluate: async (fn) => (String(fn).includes("new MutationObserver") ? 0 : mutations),
+    waitForTimeout: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
+  const started = Date.now();
+  assert.equal(await settle(page, 0, 2000), true);
+  assert.ok(Date.now() - started < 1000, "settled once 150 ms passed without a mutation");
+  // A page that keeps mutating does not settle, and the wait is still bounded.
+  const busy = { ...page, evaluate: async (fn) => (String(fn).includes("new MutationObserver") ? 0 : ++mutations) };
+  const before = Date.now();
+  assert.equal(await settle(busy, 0, 400), false);
+  assert.ok(Date.now() - before < 1500);
+  // A page that cannot be read is not quiet, and is not waited on.
+  const closed = { ...page, evaluate: async () => { throw new Error("closed"); } };
+  assert.equal(await settle(closed, 0, 5000), false);
 });

@@ -358,6 +358,7 @@ test("a batch drives an installed clock, and says why when the session's clock i
     url: () => "http://127.0.0.1:1/",
     screenshot: async () => {},
     evaluate: async () => 42,
+    waitForTimeout: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     clock: {
       runFor: async (ms) => calls.push(["runFor", ms]),
       fastForward: async (ms) => calls.push(["fastForward", ms]),
@@ -409,7 +410,7 @@ test("a batch waits for its own in-flight requests without timer globals", async
     screenshot: async () => {},
     evaluate: async () => true,
     waitForTimeout: async () => {
-      waited++;
+      if (request.ms === null) waited++;
       request.ms = 5;
     },
   };
