@@ -234,6 +234,28 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.deepEqual(state.result.note, { text: "first note", revision: 1 });
   });
 
+  // Before the ownership refusals below: they leave infrastructure faults that fail every later check.
+  await t.test("check --a11y fails an icon button without a name, and a disabled rule keeps the record", async () => {
+    const clean = await session(["check", "--a11y"]);
+    assert.equal(clean.code, 0, clean.stderr + clean.stdout.slice(-2000));
+    const unlabel = await session(["cli", "eval", "() => document.getElementById('clear').removeAttribute('aria-label')"]);
+    assert.equal(unlabel.code, 0, unlabel.stderr);
+    const failed = await session(["check", "--a11y"]);
+    assert.equal(failed.code, 1);
+    assert.match(failed.stderr, /a11y: button-name \(critical\)/);
+    const { runDir } = await manifest();
+    const faults = JSON.parse(await readFile(path.join(runDir, "faults.json"), "utf8"));
+    assert.equal(faults.a11y.faults, 1);
+    assert.match(faults.a11y.boundary, /not an audit/);
+    const excused = await session(["check", "--a11y", "--a11y-disable", "button-name"]);
+    assert.equal(excused.code, 0, excused.stderr);
+    const kept = JSON.parse(await readFile(path.join(runDir, "faults.json"), "utf8"));
+    assert.equal(kept.records.find((record) => record.rule === "button-name")?.excusedBy, "a11y.disable");
+    // A scan is of the page as it is: a plain check afterwards does not carry it.
+    assert.equal((await session(["reload"])).code, 0);
+    assert.equal((await session(["check"])).code, 0);
+  });
+
   await t.test("reset refuses a fixture that changed since start", async () => {
     const config = path.join(root, "harness.config.mjs");
     const original = await readFile(config, "utf8");
@@ -296,27 +318,6 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
       await writeFile(file, JSON.stringify({ ...after, containerId: current.containerId }, null, 2));
       await exec("docker", ["rm", "--force", decoy]);
     }
-  });
-
-  await t.test("check --a11y fails an icon button without a name, and a disabled rule keeps the record", async () => {
-    const clean = await session(["check", "--a11y"]);
-    assert.equal(clean.code, 0, clean.stderr + clean.stdout.slice(-2000));
-    const unlabel = await session(["cli", "eval", "() => document.getElementById('clear').removeAttribute('aria-label')"]);
-    assert.equal(unlabel.code, 0, unlabel.stderr);
-    const failed = await session(["check", "--a11y"]);
-    assert.equal(failed.code, 1);
-    assert.match(failed.stderr, /a11y: button-name \(critical\)/);
-    const { runDir } = await manifest();
-    const faults = JSON.parse(await readFile(path.join(runDir, "faults.json"), "utf8"));
-    assert.equal(faults.a11y.faults, 1);
-    assert.match(faults.a11y.boundary, /not an audit/);
-    const excused = await session(["check", "--a11y", "--a11y-disable", "button-name"]);
-    assert.equal(excused.code, 0, excused.stderr);
-    const kept = JSON.parse(await readFile(path.join(runDir, "faults.json"), "utf8"));
-    assert.equal(kept.records.find((record) => record.rule === "button-name")?.excusedBy, "a11y.disable");
-    // A scan is of the page as it is: a plain check afterwards does not carry it.
-    assert.equal((await session(["reload"])).code, 0);
-    assert.equal((await session(["check"])).code, 0);
   });
 
   await t.test("stop removes exactly what the session owned", async () => {
