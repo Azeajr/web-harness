@@ -53,6 +53,31 @@ export default defineHarness({
       return window.__harness.snapshot(sections);
     },
   },
+  // SERIALIZED. Production-safe, read-only: the durable copy of the note, straight from IndexedDB.
+  // `effect` reads it before and after an action on either target. Checks the database exists
+  // first: indexedDB.open() on a missing one would create it empty.
+  durable: {
+    read: async (page) =>
+      page.evaluate(async () => {
+        const names = (await indexedDB.databases()).map((database) => database.name);
+        if (!names.includes("notes")) return { note: null };
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open("notes");
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        try {
+          const note = await new Promise((resolve, reject) => {
+            const request = db.transaction("kv").objectStore("kv").get("note");
+            request.onsuccess = () => resolve(request.result ?? null);
+            request.onerror = () => reject(request.error);
+          });
+          return { note };
+        } finally {
+          db.close();
+        }
+      }),
+  },
   faults: { unservedPrefixes: ["/api/"] },
   smoke: {
     requiredHeaders: ["content-security-policy", "x-content-type-options"],

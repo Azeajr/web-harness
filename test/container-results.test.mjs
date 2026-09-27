@@ -81,3 +81,55 @@ test("rehoming leaves host paths and a missing config alone", () => {
   assert.deepEqual(rehomeResults(structuredClone(host), "/elsewhere"), host);
   assert.deepEqual(rehomeResults({ suites: [] }, "/r"), { suites: [] });
 });
+
+test("a scenario whose test passed only on retry is flaky, not verified", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wh-flaky-"));
+  try {
+    await mkdir(path.join(root, "tests/e2e"), { recursive: true });
+    await writeFile(
+      path.join(root, "harness.config.mjs"),
+      `export default { name: "demo", dev: { command: (port) => ["vite", "--port", String(port)] },
+        scenarios: [{ id: "save", title: "Save", covers: [{ file: "tests/e2e/a.spec.ts", test: "saves" }] }] };`,
+    );
+    await writeFile(path.join(root, "pnpm-lock.yaml"), "");
+    await writeFile(path.join(root, "tests/e2e/a.spec.ts"), "test('saves', () => {})\n");
+    const report = {
+      config: { rootDir: path.join(root, "tests/e2e") },
+      suites: [
+        {
+          file: "a.spec.ts",
+          specs: [
+            {
+              title: "saves",
+              file: "a.spec.ts",
+              tests: [
+                {
+                  projectName: "phone",
+                  status: "flaky",
+                  results: [
+                    { retry: 0, status: "failed", error: { message: "boom" } },
+                    { retry: 1, status: "passed" },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    await writeFile(path.join(root, "results.json"), JSON.stringify(report));
+    const strict = await scenarios(root, "results.json");
+    assert.equal(strict.code, 1, strict.out);
+    assert.match(strict.out, /flaky\s+save/);
+    assert.match(strict.out, /failed 1 attempt\(s\) before passing/);
+    const allowed = await new Promise((resolve) =>
+      execFile(process.execPath, [bin, "scenarios", "--results", "results.json", "--allow-flaky"], { cwd: root }, (error, stdout, stderr) =>
+        resolve({ code: error?.code ?? 0, out: stdout + stderr }),
+      ),
+    );
+    assert.equal(allowed.code, 0, allowed.out);
+    assert.match(allowed.out, /flaky\s+save/, "allowed, still reported as flaky");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

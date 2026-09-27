@@ -1,4 +1,4 @@
-import type { BrowserContext, TestType } from "playwright/test";
+import type { BrowserContext, PlaywrightTestConfig, TestType } from "playwright/test";
 import type { FaultKind, HarnessConfig } from "./config.js";
 
 export interface FaultRecord {
@@ -24,10 +24,20 @@ export interface HarnessFixtures {
   expectPageFault: (kind: FaultKind | null, pattern: RegExp | string) => void;
 }
 
+/** A failing test also gets network.jsonl and console.jsonl attached. */
 export declare function createHarnessTest<T extends object, W extends object>(
   base: TestType<T, W>,
-  harness?: Pick<HarnessConfig, "faults" | "initScript">,
+  harness?: Pick<HarnessConfig, "faults" | "initScript" | "evidence">,
 ): TestType<T & HarnessFixtures, W>;
+
+/**
+ * Shared config fields: forbidOnly and one retry in CI, failOnFlakyTests in CI, and the trace,
+ * screenshot and video of a failing attempt. Spread into defineConfig; `overrides.use` merges.
+ */
+export declare function harnessPlaywright(
+  harness?: Partial<HarnessConfig>,
+  overrides?: PlaywrightTestConfig,
+): PlaywrightTestConfig;
 
 export interface WebServer {
   command: string;
