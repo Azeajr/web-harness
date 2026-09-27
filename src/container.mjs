@@ -3,10 +3,11 @@ import { access, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "no
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
-import { imageFor } from "./core.mjs";
+import { imageFor, run } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
+import { checkBudget, describeBudget, parseSize } from "./resources.mjs";
 
-// web-harness e2e [--update-snapshots] [playwright args...]
+// web-harness e2e [--update-snapshots] [--prebuilt DIR] [--force-resources] [playwright args...]
 //
 // The authoritative browser run: the working tree (tracked, modified and untracked-but-not-ignored
 // files) copied into a throwaway workspace, installed from the lockfile inside the Playwright image
@@ -23,6 +24,9 @@ class DockerFailure extends Error {
 
 // Where the throwaway workspace is mounted inside the container.
 export const CONTAINER_WORKSPACE = "/work";
+
+const E2E_MEMORY_FLOOR = 3 * 1024 ** 3;
+const E2E_MEMORY_CEILING = 6 * 1024 ** 3;
 
 // Playwright's JSON report names paths as the container saw them (/work/...). Brought back to the
 // host they must name the checkout, or everything keyed on them — the scenario join above all —
@@ -49,6 +53,26 @@ function packageManager(config) {
     (config.packageManager === "npm" ? "npm ci --no-audit --no-fund" : "pnpm install --frozen-lockfile");
 }
 
+// The runner's own flags, and everything else passed through to `playwright test` untouched.
+export function e2eArguments(argv) {
+  // --prebuilt DIR: copy an already-built output (CI's checked artifact) into the workspace and
+  // tell the suite not to rebuild it, so the container tests the bytes that ship.
+  const prebuiltIndex = argv.indexOf("--prebuilt");
+  const prebuilt = prebuiltIndex >= 0 ? argv[prebuiltIndex + 1] : null;
+  if (prebuiltIndex >= 0 && (!prebuilt || prebuilt.startsWith("--")))
+    throw new Error("--prebuilt needs a directory.");
+  return {
+    updateSnapshots: argv.includes("--update-snapshots"),
+    forceResources: argv.includes("--force-resources"),
+    prebuilt,
+    playwrightArgs: argv.filter(
+      (arg, index) =>
+        !["--update-snapshots", "--force-resources"].includes(arg) &&
+        (prebuiltIndex < 0 || (index !== prebuiltIndex && index !== prebuiltIndex + 1)),
+    ),
+  };
+}
+
 export async function main(argv) {
   const config = await loadConfig();
   const root = config.root;
@@ -59,25 +83,29 @@ export async function main(argv) {
     report: "playwright-report",
     ...config.e2e,
   };
-  const updateSnapshots = argv.includes("--update-snapshots");
-  // --prebuilt DIR: copy an already-built output (CI's checked artifact) into the workspace and
-  // tell the suite not to rebuild it, so the container tests the bytes that ship.
-  const prebuiltIndex = argv.indexOf("--prebuilt");
-  const prebuilt = prebuiltIndex >= 0 ? argv[prebuiltIndex + 1] : null;
-  if (prebuiltIndex >= 0 && !prebuilt) throw new Error("--prebuilt needs a directory.");
-  const playwrightArgs = argv.filter(
-    (arg, index) =>
-      arg !== "--update-snapshots" && index !== prebuiltIndex && index !== prebuiltIndex + 1,
-  );
+  const { updateSnapshots, prebuilt, forceResources, playwrightArgs } = e2eArguments(argv);
+  const dockerOutput = (args) => run("docker", args, { cwd: root });
   const require = createRequire(path.join(config.playwrightFrom, "package.json"));
   const playwrightVersion = require("playwright/package.json").version;
   const image = imageFor(playwrightVersion);
   const dockerNetwork = process.env.WEB_HARNESS_E2E_NETWORK;
   if (dockerNetwork && !["host", "bridge"].includes(dockerNetwork))
     throw new Error("WEB_HARNESS_E2E_NETWORK must be host or bridge.");
-  // A container overrun must kill the container, not the host: these bound the run well below a
-  // developer machine's total memory. Playwright otherwise defaults to half the logical cores.
-  const dockerMemory = process.env.WEB_HARNESS_E2E_MEMORY ?? "6g";
+  // A container overrun must kill the container, not the host. By default the bound is what the
+  // host can spare right now (at most 6 GiB, at least 3 GiB), after running harness containers'
+  // possible growth and a margin; an explicit WEB_HARNESS_E2E_MEMORY is still checked against it.
+  // Playwright otherwise defaults to half the logical cores.
+  const requested = process.env.WEB_HARNESS_E2E_MEMORY;
+  const probe = await checkBudget({
+    docker: dockerOutput,
+    need: requested ? parseSize(requested) : E2E_MEMORY_FLOOR,
+    label: "Container E2E",
+    force: forceResources,
+  });
+  const dockerMemory =
+    requested ??
+    `${Math.floor(Math.min(E2E_MEMORY_CEILING, Math.max(E2E_MEMORY_FLOOR, probe.usable - probe.margin)) / 1024 ** 2)}m`;
+  if (probe.forced) console.error(describeBudget(probe, "Container E2E (forced)"));
   // Docker refuses --cpus above the host's core count, and CI runners vary: a private repo's
   // GitHub-hosted runner has 2 cores where a public one has 4. Clamp the default to what exists.
   const dockerCpus = process.env.WEB_HARNESS_E2E_CPUS ?? String(Math.min(4, availableParallelism()));

@@ -37,7 +37,7 @@ const baseValueOptions = [
   "output",
   "port",
 ];
-const flagOptions = new Set(["help", "full-page", "hires"]);
+const flagOptions = new Set(["help", "full-page", "hires", "force-resources"]);
 
 export function slug(value, label = "session") {
   if (typeof value !== "string" || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(value))
@@ -319,6 +319,7 @@ export function ownsProcess(record, actual, root, entry) {
 
 export const LABEL_ROOT = "web-harness.root";
 export const LABEL_TOKEN = "web-harness.token";
+export const LABEL_SESSION = "web-harness.session";
 
 export function ownsContainer(manifest, info) {
   return Boolean(

@@ -38,7 +38,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:docker": "node --test test/docker/*.test.mjs",
+    "test:acceptance": "node --test --test-concurrency=1 test/acceptance/*.test.mjs",
     "check": "node --check bin/web-harness.mjs && for f in src/*.mjs; do node --check \"$f\" || exit 1; done && pnpm test"
   },
   "peerDependencies": {

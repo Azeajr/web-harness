@@ -23,9 +23,6 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 
 | ID | Item | Size | Milestone |
 |---|---|---|---|
-| [H1](#h1-memory-budget-before-any-heavy-run) | Memory budget before any heavy run | S | M0 |
-| [G1](#g1-controller-acceptance-in-ci) | Controller acceptance suite in CI | L | M0 |
-| [K1–K5](#housekeeping) | Housekeeping | S | M0 |
 | [E1](#e1-failure-bundles) | Failure bundles: trace, network, console, storage, DOM | L | M1 |
 | [E2](#e2-effect-before-and-after-around-one-action) | `effect`: before/after around one action | M | M1 |
 | [E3](#e3-retries-are-attempts-flaky-is-not-verified) | Retries are attempts; flaky is not verified | S | M1 |
@@ -51,10 +48,8 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 The order is deliberate. Each milestone is one minor release; consumers bump the dependency and
 every `uses:` reference together (README, "Released by tag").
 
-- **M0 — Foundation.** H1 first: the only item here that prevents harm (a stacked container run
-  hard-crashed a 12 GB, no-swap host on 2026-09-27). Then G1, because almost every later item
-  changes controller paths that today are proven only by unit tests with mocks; after G1 each of
-  those changes is proven against a real container in CI. Housekeeping rides along.
+- **M0 — Foundation** shipped: the memory budget (H1), the acceptance suite against
+  `examples/minimal` in CI (G1), and housekeeping. Later items are proven by extending that suite.
 - **M1 — Agent evidence.** The core purpose: an agent exercises a workflow and keeps enough
   evidence to explain a failure without re-running it. E1 and E2 are the substance; E3 and E4 stop
   the evidence from lying (a hidden flaky failure, a correct error path reported as a failure). A1
@@ -66,140 +61,6 @@ every `uses:` reference together (README, "Released by tag").
   replays, nothing sensitive in evidence, the host server isolated.
 - **M4 — Agent ergonomics.** Ship the skill, close the promote-to-test step, add accessibility.
 - **M5 — Extended tier and measurement.** Scheduled coverage and harness performance baselines.
-
----
-
-## M0 — Foundation
-
-### H1. Memory budget before any heavy run
-
-**Why.** On 2026-09-27 a background `web-harness e2e` (Docker, `--memory 6g`) plus a native
-four-worker Playwright run hard-crashed and rebooted a 12 GB host with **0 B swap**. With no swap,
-memory pressure locks the machine instead of OOM-killing one process. Nothing in the harness looks
-at headroom before starting a container.
-
-**Today.**
-- `preflight`/`doctor` checks the platform, Docker, the pinned image, a probe browser launch, and
-  the port (`src/controller.mjs:387-463`). No memory check.
-- Container E2E defaults to 6 GB and `min(4, cores)` CPUs (`src/container.mjs:80-83`).
-- A session's container defaults to 3 GB, `min(2, cores)` CPUs, and the host server gets a 1 GB V8
-  heap (`src/controller.mjs:67-72`). esbuild and other server children are unbounded (comment at
-  `src/controller.mjs:63-66`).
-- Nothing counts other running harness containers.
-
-**Design.**
-- `resourceBudget()` in `src/core.mjs`:
-  - read `/proc/meminfo` (`MemAvailable`, `SwapTotal`, `SwapFree`);
-  - list running containers labelled `web-harness.root` (sessions) or named `wh-e2e-*` (E2E) and
-    sum their `HostConfig.Memory` from `docker inspect`;
-  - return `{ available, swap, harnessContainers: [{ name, memory }], need, ok }`.
-- `need` = the container's memory bound + the server heap (sessions only) + a margin. The margin
-  defaults to 1.5 GB, or 2.5 GB when swap is 0, and `WEB_HARNESS_MEMORY_MARGIN` overrides it.
-- `start` and `e2e` refuse when `MemAvailable < need`. The message names every running harness
-  container with its bound and the command that stops it (`web-harness stop --session X`). The
-  override is `--force-resources`; it is recorded in the manifest and printed on every command.
-- `e2e` memory is `auto` by default: `min(6g, MemAvailable − margin)` with a 3 GB floor; below the
-  floor it refuses. An explicit `WEB_HARNESS_E2E_MEMORY` still wins.
-- With 0 swap, `doctor` prints a table (available, swap, running harness containers, what `start`
-  and `e2e` would need) and one warning line: "no swap: memory pressure freezes the host instead of
-  killing one process".
-- The effective limits go into the manifest (see P2 `limits`).
-
-**Acceptance.**
-- Unit tests over injected meminfo text and container lists: sufficient, insufficient, no swap,
-  an already-running E2E container.
-- A second `web-harness e2e` started while one runs on a host without room is refused before any
-  `docker run`.
-- `--force-resources` proceeds and says so in its output.
-
-**Open question.** Whether to count known heavy non-harness processes (browsers, other
-containers). Start with harness containers only; other load is already reflected in `MemAvailable`.
-
-### G1. Controller acceptance in CI
-
-**Why.** Delivery step 1 in the design review: "Add focused controller acceptance to appropriate
-CI changes. Acceptance: deliberate assertion/network faults produce a nonzero verdict and retained
-original error; cleanup cannot affect a foreign session; server/worktree replacement is rejected."
-The review also lists "Controller Docker acceptance is opt-in" as a gap. It still is.
-
-**Today.**
-- web-harness CI runs `pnpm check` (syntax plus unit tests, one of which drives a real Chromium)
-  (`.github/workflows/ci.yml:26`, `package.json` `check`).
-- `package.json` has `"test:docker": "node --test test/docker/*.test.mjs"`, but `test/docker/`
-  does not exist (see K1).
-- `examples/` is an empty local directory (see K2).
-- chess-mcp's `scripts/harness.integration.test.mjs` drives the real controller against the chess
-  app, but it is opt-in and local: "Docker, not in CI" (`chess-mcp/docs/PROJECT_STATE.md:31`).
-- Result: `start`, `run`, `restart`, `reset` and `stop` against a real container, and the ownership
-  refusals, have no automated proof in any CI.
-
-**Design.**
-- `examples/minimal/`: the smallest app that exercises every adapter hook.
-  - Vite with no framework: `index.html` and `main.js`.
-  - A save button that writes to localStorage and IndexedDB.
-  - A service worker (vite-plugin-pwa, `registerType: 'prompt'`, like every consumer), so the smoke
-    and O1 have something real to test.
-  - A route that calls `console.error` on demand (for induced faults), and a `fetch('/api/x')` for
-    `unservedPrefixes`.
-  - `public/_headers` with a CSP.
-  - A dev-only state accessor (`window.__harness`).
-  - `harness.config.mjs` with two fixtures (one through a file input, like chorequest), `state`,
-    `production`, `smoke` hooks and three scenarios: one test, one lane, one `unsupported`.
-  - A two-test Playwright suite using `createHarnessTest`.
-  - Its own `package.json` and lockfile, not a workspace member, so `web-harness e2e` exercises a
-    real install.
-- `test/docker/controller.test.mjs`, each case with an explicit timeout and a `finally` that stops
-  the session:
-  1. `preflight` passes and prints the image ID.
-  2. `start` (dev): a manifest with identity, `00-seeded.yml`, the seeded screenshot, zero faults.
-  3. `run` of a passing batch using `step`, `assert`, `observe`, `state`: `ok: true`, steps timed.
-  4. `run` of a batch that triggers `console.error`: exit 1, the original error retained, a
-     screenshot and state captured, `faults.json` written.
-  5. `restart`: the saved value is still there, and faults from before the restart are retained.
-  6. `reset`: a new run directory, the fixture replayed, the saved value gone.
-  7. `reset` after editing the fixture's `apply`: refused ("Fixture/setup changed").
-  8. A second `start` on the same port from another session: refused by the lease.
-  9. A foreign server on the port (a plain `http.createServer`): refused, and never signalled.
-  10. `start --target production`: build digest recorded, `state` answers `unsupported`, no dev
-      identity meta tag.
-  11. `stop`: afterwards `docker ps -a --filter label=web-harness.root=<root>` is empty, the lease
-      file under `/tmp` is gone, and the server PID no longer exists.
-  12. An interrupted `start` (SIGINT after the container is created): cleanup runs and nothing is
-      left.
-- `test/docker/smoke.test.mjs`: the smoke passes on the example. Each broken variant fails in the
-  right phase: a missing header (`headers`), a leaked `__harness` (`globals`), a service worker
-  that never installs (`sw`), an unprecached `index.html` (`offline`).
-- `test/docker/e2e.test.mjs`: container E2E on the example, with results rehomed and `scenarios
-  --results` reporting `verified`.
-- CI: a `docker` job on `ubuntu-latest` (a public repository gets 4 cores and 16 GB, and Docker is
-  preinstalled). Cache the pinned image by tag. The job is required in `verdict` whenever `src/`,
-  `bin/`, `test/docker/` or `examples/` change (a `scope` output for those paths).
-
-**Acceptance.**
-- The job is green on `main`.
-- Verified by reverting guards (a test that has never failed proves nothing): make
-  `ownsContainer` return `true` and case 9 or 11 fails; drop the retained-faults concat in `check`
-  (`src/controller.mjs:635-641`) and case 5 fails; remove the digest refusal in `reset`
-  (`src/controller.mjs:1031-1035`) and case 7 fails.
-- Record the job's wall time. **Open question:** the estimate is 5–8 minutes, mostly the image
-  pull.
-
-### Housekeeping
-
-- **K1.** `package.json` `test:docker` points at `test/docker/`, which does not exist. Create it
-  with G1, or remove the script until then.
-- **K2.** `examples/` is an empty directory in the local checkout (git does not track empty
-  directories). It becomes `examples/minimal/` with G1.
-- **K3.** `docs/HARNESS.md:5-8` names "keep a failure bundle" as a step of the loop. Today a
-  failure keeps a screenshot, a state read and `faults.json`, not a bundle. Qualify the sentence now
-  and restore it when E1 ships.
-- **K4.** Release checklist in the README: tag; update the `#vX` in the README install line and the
-  `@vX` in its `uses:` lines; list consumers that need the bump.
-- **K5.** Version drift check. Consumers must pin the same tag in the dependency and in every
-  `uses:` reference (README, "Released by tag"). As of 2026-09-27 they sit on different tags
-  (training-log and tabletop v0.1.2, chess-mcp v0.1.3, chorequest v0.1.4). `doctor` should read the
-  installed package version and grep `.github/workflows/*.yml` for
-  `Azeajr/web-harness/.github/actions/*@v…`, and warn on any mismatch.
 
 ---
 
@@ -1060,7 +921,7 @@ For orientation, and so that nobody re-implements these:
 
 | Review section | Requirement | Status / item |
 |---|---|---|
-| A | `doctor` | built; resource budget → H1 |
+| A | `doctor` | built, with the memory budget |
 | A | `start --target` | built |
 | A | `run` with step history | built; attempts → E3 |
 | A | `observe`, `state` | built |
@@ -1089,8 +950,8 @@ For orientation, and so that nobody re-implements these:
 | E | mutation in isolation | built; scheduling → **G2** |
 | F | warm session, batching, narrow state, build once | built |
 | F | measure equivalent scenarios | **H3** |
-| F | bound container and host separately | built; headroom → **H1** |
-| Delivery 1 | controller acceptance in CI | **G1** |
-| Delivery 2 | production restart journey | built (proven by hand in chess-mcp and training-log, 2026-09-27); automated → **G1** case 5 and 10 |
+| F | bound container and host separately | built, with the memory budget |
+| Delivery 1 | controller acceptance in CI | built (`test/acceptance`, required in CI) |
+| Delivery 2 | production restart journey | built; automated in `test/acceptance` |
 | Delivery 3 | scenario inventory and aggregate gate | built; tied to revision → **P4** |
 | Delivery 4 | failure bundles explain a real induced defect | **E1** acceptance |

@@ -4,7 +4,7 @@ One harness for four offline-first Vite PWAs. It exists to close one loop:
 
 > start an owned environment → apply a reproducible fixture through the real UI → act through
 > visible controls → observe narrow state and visible effects → assert a terminal condition → keep
-> a failure bundle → promote the reproduction into an ordinary test → verify the artifact that
+> the failure evidence → promote the reproduction into an ordinary test → verify the artifact that
 > actually ships.
 
 Every piece below serves a step of that loop. Where a piece cannot prove something, it says so.
@@ -155,6 +155,14 @@ scope → checks (lint, typecheck, coverage, build → dist artifact + digest)
 - Linux only (Docker host networking, `/proc` ownership checks).
 - Container CPU bounds default to at most the host's cores (Docker refuses more): 4 for E2E, 2 for
   sessions. A private repository's GitHub-hosted runner has 2 cores.
+- **Memory budget.** `start`/`preflight` and `e2e` read `/proc/meminfo` and refuse to start a
+  container the host cannot hold: its bound (plus the host server's heap for a session) plus a
+  margin must fit in `MemAvailable`, less what running harness containers may still grow into up to
+  their own bounds. The margin is 1.5 GiB, or 2.5 GiB without swap, where memory pressure freezes
+  the host instead of killing one process (`WEB_HARNESS_MEMORY_MARGIN` overrides it). `e2e` sizes
+  its container to what is free, between 3 and 6 GiB, unless `WEB_HARNESS_E2E_MEMORY` sets it.
+  `--force-resources` proceeds anyway and is recorded. Run one heavy job at a time regardless: the
+  budget sees harness containers, not a browser suite started outside the harness.
 - Emulated WebKit is not iOS Safari; installed-PWA behaviour, locked-phone timers and OS
   notification delivery need a real device — list them as `unsupported` scenarios.
 - The static server does not run Pages Functions or `_redirects` (it refuses a build that has one).

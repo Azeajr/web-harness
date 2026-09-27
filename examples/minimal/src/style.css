@@ -1,0 +1,16 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 1rem;
+  max-width: 32rem;
+}
+
+label,
+button {
+  display: block;
+  margin: 0.5rem 0;
+}
+
+#update {
+  border: 1px solid;
+  padding: 0.5rem;
+}

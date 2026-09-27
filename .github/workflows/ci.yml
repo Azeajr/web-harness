@@ -38,13 +38,46 @@ jobs:
       - id: scope
         uses: ./.github/actions/scope
         with:
-          skip: '^(README\.md|docs/.+\.md|LICENSE)$'
+          skip: '^(README\.md|ROADMAP\.md|docs/.+\.md|LICENSE)$'
       - run: test -n "$CODE"
         env:
           CODE: ${{ steps.scope.outputs.code }}
 
+  # Real sessions, smoke and container E2E against examples/minimal, through a packed install:
+  # the only proof that start/run/restart/reset/stop and the ownership refusals work end to end.
+  acceptance:
+    needs: actions
+    if: needs.actions.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          node-version: 24
+          browsers: chromium
+          checkout: 'false'
+      - name: Pull the Playwright image matched to this version
+        run: docker pull "mcr.microsoft.com/playwright:v$(node -p "require('playwright/package.json').version")-noble"
+      - run: pnpm test:acceptance
+        env:
+          # Kept after the run so a failure's evidence can be uploaded below.
+          WEB_HARNESS_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
+          WEB_HARNESS_ACCEPTANCE_KEEP: '1'
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: acceptance-evidence
+          path: |
+            ${{ runner.temp }}/acceptance/*/.web-harness/
+            ${{ runner.temp }}/acceptance/*/playwright-report/
+          if-no-files-found: ignore
+          include-hidden-files: true
+
   verdict:
-    needs: [test, actions]
+    needs: [test, actions, acceptance]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -56,4 +89,4 @@ jobs:
         with:
           needs: ${{ toJSON(needs) }}
           code: ${{ needs.actions.outputs.code }}
-          required: test
+          required: test acceptance
