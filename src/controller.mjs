@@ -11,6 +11,7 @@ import {
   appendFile,
   rm,
   stat,
+  readdir,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { availableParallelism } from "node:os";
@@ -70,7 +71,11 @@ import {
   toJsonl,
 } from "./evidence.mjs";
 import { observe, readState } from "./inspect.mjs";
-import { functionSource, loadConfig } from "./config.mjs";
+import { environmentConfig, functionSource, loadConfig } from "./config.mjs";
+import { serverEnvironment } from "./hostenv.mjs";
+import { SCHEMA_VERSION, artifactKind } from "./manifest.mjs";
+import { sourceIdentity } from "./provenance.mjs";
+import { STATUS, outcome } from "./status.mjs";
 import { checkBudget, describeBudget, formatSize, parseSize } from "./resources.mjs";
 import { describeDrift, versionDrift } from "./versions.mjs";
 
@@ -85,6 +90,8 @@ const containerMemory = process.env.WEB_HARNESS_DOCKER_MEMORY ?? "3g";
 const containerCpus =
   process.env.WEB_HARNESS_DOCKER_CPUS ?? String(Math.min(2, availableParallelism()));
 const serverHeapMb = process.env.WEB_HARNESS_SERVER_HEAP_MB ?? "1024";
+// How long one Playwright CLI call may take before its outcome is unknown (see reconcile).
+const cliTimeout = Number(process.env.WEB_HARNESS_CLI_TIMEOUT_MS ?? 180_000);
 if (!/^[1-9]\d{1,4}$/.test(serverHeapMb))
   throw new Error("WEB_HARNESS_SERVER_HEAP_MB must be a positive integer number of megabytes.");
 
@@ -155,11 +162,13 @@ Usage: web-harness [--session NAME] <command> [options]
   cli <args...>   Run arbitrary Playwright CLI commands inside the owned session
   observe SELECTOR  Inspect a targeted region as compact JSON (up to five matches)
   state           Read the app's development state accessor as compact JSON (dev target only)
-  run REPO_FILE [--trace off|retain-on-failure|keep]
+  run REPO_FILE [--trace off|retain-on-failure|keep] [--scenario ID] [--after-unknown]
                   Batch trusted async (page, {step, assert, observe, state, effect, allowFault,
                   expectFault}) => {...}; JSON result; a failure keeps a bundle (network, console,
                   accessibility tree, storage, state, timeline, trace when on)
   effect [--observe SEL]... [--state a,b] [--durable] [--until SEL] [--expect change|none] -- <cli command>
+  reconcile       After a batch whose outcome is unknown (a transport timeout): capture the
+                  current state beside it and allow runs again (or pass run --after-unknown)
                   Read what is watched, run one CLI action, settle, read again: JSON diff
 
 Start/preflight: --target dev|production (default dev) --fixture NAME
@@ -169,7 +178,8 @@ Start/preflight: --target dev|production (default dev) --fixture NAME
   --setup REPO_FILE (trusted async page => {...} returning JSON postconditions)
   --workflow SLUG --output DIRECTORY (default .web-harness; repeat for later commands)
   --force-resources (start although the memory budget refuses; recorded in the manifest)
-  --trace MODE (default for every run in this session)${config.options.length ? `\n  Project options: ${config.options.map((name) => `--${name}`).join(" ")}` : ""}
+  --trace MODE (default for every run in this session)
+  --timezone IANA --locale TAG --clock real|fixed|install --now ISO (override harness environment)${config.options.length ? `\n  Project options: ${config.options.map((name) => `--${name}`).join(" ")}` : ""}
 Fixtures:
 ${fixtures}
 Reset refuses changed fixture/setup digests; use stop/start to establish a changed baseline.
@@ -194,7 +204,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
   async function health({ browser = true } = {}) {
     try {
       if (!manifest.identity) throw new Error("Session has no server identity. Stop/start.");
-      if (manifest.status === "infrastructure-failed")
+      if (manifest.state === "infrastructure-failed")
         throw new Error("Session lost server continuity. Stop/start to reseed.");
       if (
         manifest.server &&
@@ -233,7 +243,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
           throw new Error("Browser is attached to a different server. Stop/start to reseed.");
       }
     } catch (error) {
-      manifest.status = "infrastructure-failed";
+      manifest.state = "infrastructure-failed";
       manifest.infrastructureFaults ??= [];
       manifest.infrastructureFaults.push({
         at: new Date().toISOString(),
@@ -280,7 +290,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
           ...(raw ? ["--raw"] : []),
           ...args,
         ],
-        { print: !structuredOutput, timeout: 180_000 },
+        { print: !structuredOutput, timeout: cliTimeout },
       );
       // CLI tools may report an error while the transport itself exits successfully.
       if (/^### Error\b/m.test(output)) throw new Error(output);
@@ -379,9 +389,9 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
 
   // A bundle for a failure outside a batch (a failed check, start, restart or reload).
   let failureBundled = false;
-  async function captureFailure(reason, faults = []) {
-    manifest.failures = (manifest.failures ?? 0) + 1;
-    const directory = path.join(manifest.runDir, `failure-${manifest.failures}`);
+  async function captureFailure(reason, faults = [], into = null) {
+    manifest.failures = (manifest.failures ?? 0) + (into ? 0 : 1);
+    const directory = into ?? path.join(manifest.runDir, `failure-${manifest.failures}`);
     await mkdir(directory, { recursive: true });
     const errors = [];
     let captured = null;
@@ -449,12 +459,23 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         : "async (page, { state }) => state()";
     const sourceDigest = digest(source);
     const trace = command === "run" ? (options.trace ?? manifest.trace ?? config.evidence.trace) : "off";
+    const scenarioId = options.scenario ?? null;
+    if (scenarioId && !config.scenarios.some((scenario) => scenario.id === scenarioId))
+      throw new Error(`Unknown scenario ${scenarioId}. Registered: ${config.scenarios.map((scenario) => scenario.id).join(", ") || "(none)"}.`);
+    // A batch whose outcome is unknown may have mutated state; replaying it blindly could apply
+    // it twice. Look first (reconcile), or say you know (--after-unknown).
+    if (command === "run" && manifest.pendingReconciliation && !options["after-unknown"])
+      throw new Error(
+        `The outcome of batch ${manifest.pendingReconciliation.batchId} is unknown (${manifest.pendingReconciliation.reason}). ` +
+          "Run `web-harness reconcile` to capture the current state first, or pass --after-unknown.",
+      );
     const wrapped = batchSource(source, base, {
       stateSpec: stateSpec(),
       policy: config.policy,
       durable: durableSource(),
       trace,
       batchId: id,
+      clockMode: manifest.seed?.environment?.clock ?? "real",
     });
     await writeFile(path.join(base, "source.js"), source);
     await writeFile(path.join(base, "wrapped.js"), wrapped);
@@ -463,13 +484,25 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       report = await cli(["run-code", `--filename=${path.join(base, "wrapped.js")}`], { raw: true });
       await health();
     } catch (error) {
-      // Transport/server failures must remain failures even when browser-side work succeeded.
+      // Transport/server failures must remain failures even when browser-side work succeeded. With
+      // no page-side report at all, what the batch did is unknown.
+      const unknown = !report;
       report = {
         ...report,
         ok: false,
         error: report?.error ?? error.message,
         controllerError: error.message,
+        ...(unknown ? { outcome: "unknown" } : {}),
       };
+      if (unknown && command === "run") {
+        manifest.pendingReconciliation = {
+          batchId: id,
+          sourceDigest,
+          reason: error.message.split("\n")[0].slice(0, 200),
+          at: new Date().toISOString(),
+        };
+        await save();
+      }
     }
     const captured = report.bundle ?? null;
     delete report.bundle;
@@ -505,12 +538,23 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       report.priorAttempts = prior.map(({ batchId, ok, error }) => ({ batchId, ok, error }));
       manifest.attempts = [
         ...(manifest.attempts ?? []),
-        { batchId: id, sourceDigest, ok: report.ok, error: report.error ?? null, at: new Date().toISOString() },
+        {
+          batchId: id,
+          attemptId: `${id}#${report.attempt}`,
+          scenarioId,
+          sourceDigest,
+          ok: report.ok,
+          status: outcome({ ok: report.ok, infrastructure: Boolean(report.controllerError) }),
+          error: report.error ?? null,
+          at: new Date().toISOString(),
+        },
       ];
       await save();
     }
     report = {
       ...report,
+      status: outcome({ ok: report.ok, infrastructure: Boolean(report.controllerError) }),
+      scenarioId,
       runId: manifest.runId,
       batchId: id,
       target: manifest.target,
@@ -534,6 +578,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     });
     await printStructured(report, {
       ok: report.ok,
+      status: report.status,
       error: report.error,
       runId: report.runId,
       batchId: id,
@@ -543,6 +588,27 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       timing: report.timing,
       screenshot: report.artifacts?.screenshot ?? null,
     });
+  }
+
+  // After a batch whose outcome is unknown: capture what the page looks like now (screenshot,
+  // accessibility tree, storage, recent requests and console, faults) next to that batch, then allow
+  // runs again. Read-only.
+  async function reconcile() {
+    const pending = manifest.pendingReconciliation;
+    if (!pending) {
+      console.log(JSON.stringify({ ok: true, status: STATUS.passed, pending: null }));
+      return;
+    }
+    const checked = await check({ throwOnFault: false }).catch(() => null);
+    const directory = path.join(manifest.runDir, pending.batchId, "reconcile");
+    const written = await captureFailure("reconcile", checked?.all ?? [], directory);
+    manifest.pendingReconciliation = null;
+    manifest.reconciled = [...(manifest.reconciled ?? []), { ...pending, directory, at: new Date().toISOString() }];
+    await save();
+    await event("reconciled", { batchId: pending.batchId, directory });
+    console.log(
+      JSON.stringify({ ok: true, status: STATUS.passed, reconciled: pending.batchId, directory, summary: written.summary }),
+    );
   }
 
   // `effect ... -- <cli command>`: read what is watched, run one Playwright CLI action, settle,
@@ -572,6 +638,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     const id = `effect-${randomUUID()}`;
     const report = {
       ok: !problem,
+      status: outcome({ ok: !problem }),
       error: problem,
       action: positional,
       actionOutput: actionOutput.slice(0, 2000),
@@ -610,9 +677,17 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
           resolve: (value) => resolvePath(root, value),
         })
       : null;
+    // Timezone, locale and clock are part of the baseline: reset refuses a changed one.
+    const environment = environmentConfig(config.environment, {
+      timezoneId: options.timezone,
+      locale: options.locale,
+      now: options.now,
+      clock: options.clock,
+    });
     const seed = {
       fixture: name,
       target,
+      environment,
       data: data ?? null,
       options: projectOptions,
       setupPath,
@@ -709,6 +784,13 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     if (resources.forced) console.error(describeBudget(resources, "Session (forced)"));
     const drift = await versionDrift(root);
     for (const warning of describeDrift(drift)) console.error(`warning: ${warning}`);
+    // Evidence can hold private data (traces carry bodies); it must never be committed.
+    const evidenceDirectory = path.relative(root, await resolvePath(root, options.output ?? ".web-harness", { outside: Boolean(options.output) }));
+    const evidenceIgnored =
+      evidenceDirectory.startsWith("..") ||
+      (await run("git", ["check-ignore", "-q", `${evidenceDirectory}/probe`], { cwd: root }).then(() => true, () => false));
+    if (!evidenceIgnored)
+      console.error(`warning: ${evidenceDirectory}/ is not ignored by git; add it to .gitignore (evidence can hold private data).`);
     const report = {
       project: config.name,
       node: process.version,
@@ -731,6 +813,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         running: resources.containers.map((container) => container.name),
       },
       webHarness: { version: drift.version, workflowMismatches: drift.mismatches.length },
+      evidenceIgnored,
     };
     console.log(JSON.stringify(report, null, 2));
     return {
@@ -781,8 +864,26 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
   async function startServer() {
     const log = await open(path.join(manifest.runDir, "server.log"), "a");
     const port = new URL(manifest.seed.url).port;
+    // The developer's environment stays out of the server: an allowlist, and HOME/XDG in the session.
+    const home = path.join(path.dirname(manifestPath), "home");
+    await mkdir(home, { recursive: true });
+    const host = serverEnvironment(process.env, {
+      home,
+      allow: config.dev.env,
+      isolate: config.dev.home === "isolated",
+    });
+    if (host.isolated && config.packageManager === "pnpm" && !host.env.npm_config_store_dir) {
+      const store = await run("pnpm", ["store", "path"], { cwd: root, timeout: 15_000 }).catch(() => null);
+      if (store) host.env.npm_config_store_dir = store;
+    }
+    manifest.hostEnvironment = {
+      isolated: host.isolated,
+      home: host.isolated ? home : null,
+      passed: host.passed,
+      dropped: host.dropped.length,
+    };
     const env = {
-      ...process.env,
+      ...host.env,
       WEB_HARNESS_PORT: port,
       WEB_HARNESS_TOKEN: manifest.token,
       WEB_HARNESS_ROOT: root,
@@ -934,6 +1035,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       JSON.stringify(
         {
           checkedAt: new Date().toISOString(),
+          status: outcome({ ok: !faults.length }),
           runId: manifest.runId,
           target: manifest.target,
           records,
@@ -969,6 +1071,15 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
   // Open the session's browser on its persistent profile and install the fault policy before any
   // app request, including first boot.
   async function openBrowser() {
+    const environment = manifest.seed.environment ?? {};
+    const contextOptions = Object.fromEntries(
+      [
+        ["timezoneId", environment.timezoneId],
+        ["locale", environment.locale],
+      ].filter(([, value]) => value),
+    );
+    const configFile = path.join(path.dirname(manifestPath), "cli.config.json");
+    await writeFile(configFile, JSON.stringify({ browser: { contextOptions } }, null, 2) + "\n");
     console.log(
       await cli([
         "open",
@@ -976,6 +1087,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         `--browser=${manifest.browser}`,
         `--device=${manifest.device}`,
         `--profile=${manifest.profileDir}`,
+        `--config=${configFile}`,
       ]),
     );
     await health({ browser: false });
@@ -990,6 +1102,27 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         initScript: config.initScript ? functionSource(config.initScript, "initScript") : null,
       },
       faultLib,
+    );
+    // Applied on every open, so `restart` keeps the same pinned instant (chorequest used to lose it).
+    if (environment.clock && environment.clock !== "real")
+      await code(
+        async (page, env) => {
+          if (env.clock === "fixed") await page.clock.setFixedTime(new Date(env.now));
+          else await page.clock.install({ time: new Date(env.now) });
+          return env.clock;
+        },
+        { clock: environment.clock, now: environment.now },
+      );
+  }
+
+  // What the page actually runs with, read back — not what was requested.
+  async function effectiveEnvironment() {
+    return code(async (page) =>
+      page.evaluate(() => ({
+        timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        locale: navigator.language,
+        now: new Date().toISOString(),
+      })),
     );
   }
 
@@ -1035,11 +1168,9 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       ]),
     );
     await screenshot("seeded", { hires: true });
-    manifest.source = {
-      commit: await run("git", ["rev-parse", "HEAD"], { cwd: root }).catch(() => null),
-      worktree: await run("git", ["status", "--short"], { cwd: root }).catch(() => null),
-    };
-    manifest.status = "ready";
+    manifest.source = await sourceIdentity(root);
+    manifest.environment = { requested: manifest.seed.environment, effective: await effectiveEnvironment() };
+    manifest.state = "ready";
     await save();
     await writeFile(
       path.join(manifest.runDir, "manifest.json"),
@@ -1056,7 +1187,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     manifest.retainedFaults = [...(manifest.retainedFaults ?? []), ...before.records];
     await event("restart-requested", { retained: before.records.length });
     await cli(["close"]);
-    manifest.status = "restarting";
+    manifest.state = "restarting";
     manifest.restarts = (manifest.restarts ?? 0) + 1;
     await save();
     await openBrowser();
@@ -1065,7 +1196,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       { url: manifest.seed.url, data: null },
       `{ ready: ${config.ready ? functionSource(config.ready, "ready") : "null"}, apply: null }`,
     );
-    manifest.status = "ready";
+    manifest.state = "ready";
     await save();
     await screenshot(`restart-${manifest.restarts}`);
     await check();
@@ -1129,17 +1260,48 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         errors.push(error.message);
       }
     }
-    manifest.status = errors.length ? "cleanup-failed" : "stopped";
+    if (!errors.length)
+      await rm(path.join(path.dirname(manifestPath), "home"), { recursive: true, force: true });
+    manifest.state = errors.length ? "cleanup-failed" : "stopped";
+    manifest.cleanup = { status: errors.length ? STATUS.failed : STATUS.passed, errors, at: new Date().toISOString() };
+    manifest.artifacts = await listArtifacts(manifest.runDir).catch(() => []);
     await save();
-    await event("cleanup", { status: manifest.status, errors });
+    await event("cleanup", { status: manifest.cleanup.status, errors });
     if (errors.length) throw new Error(errors.join("\n"));
+  }
+
+  // Every file a run produced, with its kind and size, for the manifest's index. A request or
+  // console log whose ring dropped older entries (a bundle's index.json counts them) is truncated.
+  async function listArtifacts(directory) {
+    const found = [];
+    const walk = async (relative) => {
+      const entries = await readdir(path.join(directory, relative), { withFileTypes: true });
+      const index = entries.some((entry) => entry.name === "index.json")
+        ? await readFile(path.join(directory, relative, "index.json"), "utf8")
+            .then((text) => JSON.parse(text).files ?? [])
+            .catch(() => [])
+        : [];
+      for (const entry of entries) {
+        const child = path.join(relative, entry.name);
+        if (entry.isDirectory()) await walk(child);
+        else if (entry.isFile() && !/^command-.*\.js$/.test(entry.name))
+          found.push({
+            path: child,
+            kind: artifactKind(entry.name),
+            bytes: (await stat(path.join(directory, child))).size,
+            truncated: (index.find((file) => file.name === entry.name)?.dropped ?? 0) > 0,
+          });
+      }
+    };
+    await walk("");
+    return found;
   }
 
   async function commandMain() {
     const { command, options, positional } = parseArgs(argv, {
       extraValueOptions: config.options,
     });
-    structuredOutput = ["run", "observe", "state", "effect"].includes(command);
+    structuredOutput = ["run", "observe", "state", "effect", "reconcile"].includes(command);
     if (command === "help" || options.help) return help();
     const session = slug(options.session ?? config.name);
     const output = await resolvePath(root, options.output ?? ".web-harness", {
@@ -1163,23 +1325,33 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
+    if (manifest?.schema === 2)
+      throw new Error(
+        `Session ${session} was started by an older web-harness (manifest schema 2). Stop it with that ` +
+          `version, or remove its container (docker ps --filter label=${LABEL_ROOT}=${root}) and ${directory}.`,
+      );
     if (
       manifest &&
       (manifest.root !== root ||
         manifest.session !== session ||
         manifest.output !== output ||
         manifest.project !== config.name ||
-        manifest.schema !== 2)
+        manifest.schemaVersion !== SCHEMA_VERSION)
     )
       throw new Error("Invalid session manifest ownership.");
     if (command === "start") {
-      if (manifest && manifest.status !== "stopped")
+      if (manifest && manifest.state !== "stopped")
         throw new Error("Session already exists. Use status, reset, or stop before start.");
+      const startedAt = performance.now();
+      const phase = (name, since) => {
+        manifest.timings[name] = Math.round(performance.now() - since);
+      };
       const seed = await prepareFixture(options);
       const environment = await preflight(options);
+      const preflightMs = Math.round(performance.now() - startedAt);
       assertRunning();
       manifest = {
-        schema: 2,
+        schemaVersion: SCHEMA_VERSION,
         project: config.name,
         root,
         session,
@@ -1192,11 +1364,13 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         workflow: slug(options.workflow ?? "review", "workflow"),
         // Default for `run` in this session; `run --trace` overrides it per batch.
         trace: options.trace ?? null,
-        status: "starting",
+        state: "starting",
         server: null,
         containerId: null,
         profileDir: path.join(directory, "profile"),
         retainedFaults: [],
+        driver: { playwright: version, node: process.version },
+        timings: { preflight: preflightMs },
       };
       creating = true;
       await rm(manifest.profileDir, { recursive: true, force: true });
@@ -1210,13 +1384,20 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
           manifestPath,
         });
         await save();
-        if (manifest.target === "production") await buildProduction(directory);
+        let since = performance.now();
+        if (manifest.target === "production") {
+          await buildProduction(directory);
+          phase("build", since);
+        }
+        since = performance.now();
         await startServer();
+        phase("serverReady", since);
       } else {
         manifest.identity = await serverIdentity(seed.url, root);
         await save();
       }
       assertRunning();
+      const containerSince = performance.now();
       manifest.containerId = await docker([
         "create",
         "--init",
@@ -1254,7 +1435,12 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       ]);
       await save();
       await docker(["start", manifest.containerId]);
+      phase("container", containerSince);
+      const initializeSince = performance.now();
       await initialize();
+      phase("initialize", initializeSince);
+      phase("total", startedAt);
+      await save();
       creating = false;
       return;
     }
@@ -1274,20 +1460,20 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       throw new Error("Invalid run directory in manifest.");
     await resolvePath(root, manifest.runDir, { outside: true });
     if (command === "stop") {
-      if (manifest.status !== "stopped") {
+      if (manifest.state !== "stopped") {
         await health().catch(() => {});
         await check({ throwOnFault: false });
       }
       return cleanup();
     }
     if (command === "status") {
-      if (!["stopped", "infrastructure-failed", "cleanup-failed"].includes(manifest.status)) {
+      if (!["stopped", "infrastructure-failed", "cleanup-failed"].includes(manifest.state)) {
         await health({ browser: false }).catch(async () => check({ throwOnFault: false }));
       }
       console.log(
         JSON.stringify(
           {
-            status: manifest.status,
+            state: manifest.state,
             target: manifest.target,
             fixture: manifest.seed.fixture,
             build: manifest.build ?? null,
@@ -1326,6 +1512,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     }
     await event("command", { command, args: positional });
     if (command === "effect") return effectCommand(positional, options.watch);
+    if (command === "reconcile") return reconcile();
     if (structuredOutput) return structuredCommand(command, positional, options);
     if (command === "reset") {
       const seed = await prepareFixture(manifest.options);
@@ -1341,7 +1528,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       manifest.retainedFaults = [];
       manifest.restarts = 0;
       await newRun();
-      manifest.status = "resetting";
+      manifest.state = "resetting";
       await save();
       await initialize();
     } else if (command === "restart") await restart();

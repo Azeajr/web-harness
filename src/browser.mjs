@@ -15,13 +15,16 @@ export async function installPolicy(page, config, lib) {
   // Every request and console line, bounded, for failure bundles (src/evidence.mjs).
   if (config.evidence) lib.installEvidence(context, config.evidence, lib);
   const { policy, origin } = config;
+  // URLs in fault details pass the same redaction as the evidence rings.
+  const redact = (url) => (config.evidence ? lib.redactUrl(url, config.evidence.redactQuery) : url);
   const record = (kind, detail) =>
     context.__webHarnessFaults.push({ at: new Date().toISOString(), kind, detail });
   const warn = (detail, location) =>
     context.__webHarnessWarnings.push({ at: new Date().toISOString(), detail, location });
   const attach = (target) => {
     target.on("console", (message) => {
-      const detail = lib.describeConsole(message.text(), message.location());
+      const location = message.location();
+      const detail = lib.describeConsole(message.text(), location?.url ? { ...location, url: redact(location.url) } : location);
       const kind = lib.consoleKind(message.type(), detail, policy);
       if (
         kind === "warning" ||
@@ -38,17 +41,17 @@ export async function installPolicy(page, config, lib) {
   context.on("requestfailed", (request) => {
     // An aborted navigation guard is recorded as infrastructure below; do not count it twice.
     if (request.failure()?.errorText === "net::ERR_BLOCKED_BY_CLIENT") return;
-    record("requestfailed", `${request.method()} ${request.url()}: ${request.failure()?.errorText}`);
+    record("requestfailed", `${request.method()} ${redact(request.url())}: ${request.failure()?.errorText}`);
   });
   context.on("response", (response) => {
     if (lib.isUnserved(response.url(), origin, policy)) return;
     if (response.status() >= policy.httpErrorStatus)
-      record("http", `${response.status()} ${response.url()}`);
+      record("http", `${response.status()} ${redact(response.url())}`);
   });
   await context.route(
     (url) => lib.isExternal(url.href, origin),
     async (route) => {
-      const detail = `${route.request().method()} ${route.request().url()}`;
+      const detail = `${route.request().method()} ${redact(route.request().url())}`;
       if (policy.external === "fault") record("external", detail);
       else warn(`external (stubbed): ${detail}`);
       await route.fulfill(lib.STUB_EXTERNAL);

@@ -53,13 +53,16 @@ export const test = createHarnessTest(base, harness)
 ## Commands
 
 ```
-web-harness preflight | start | run FILE | observe SEL | state | reload | restart | reset
-            screenshot LABEL | check | status | stop | cli ...        (agent sessions)
+web-harness preflight | start | run FILE | observe SEL | state | effect … -- CLI | reload
+            restart | reset | reconcile | screenshot LABEL | check | status | stop | cli ...
+                                                                     (agent sessions)
 web-harness serve --dir dist --port N [--unserved /api/]             (Pages-style server)
 web-harness smoke [--dist DIR]                                       (production smoke)
-web-harness e2e [--update-snapshots] [--prebuilt DIR] [pw args]      (container E2E)
+web-harness e2e [--update-snapshots] [--prebuilt DIR] [--timezone Z --locale L] [pw args]
+                                                                     (container E2E)
 web-harness mutate [stryker args]                                    (mutation, throwaway copy)
-web-harness scenarios [--results playwright.json]                    (scenario inventory)
+web-harness scenarios [--results playwright.json] [--lane NAME=REPORT] [--allow-flaky]
+                                                                     (scenario inventory)
 web-harness digest DIR [--expect SHA]                                (build content digest)
 ```
 

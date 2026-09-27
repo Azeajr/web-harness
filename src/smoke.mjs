@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { directoryDigest } from "./core.mjs";
+import { sourceIdentity } from "./provenance.mjs";
+import { outcome } from "./status.mjs";
 import { loadConfig } from "./config.mjs";
 import { toJsonl } from "./evidence.mjs";
 import { failures } from "./faults.mjs";
@@ -107,6 +109,7 @@ export async function main(argv) {
     project: config.name,
     dist,
     digest: await directoryDigest(dist),
+    source: await sourceIdentity(config.root),
     startedAt: new Date().toISOString(),
     checks: [],
     faults: [],
@@ -361,6 +364,7 @@ export async function main(argv) {
     await served.close();
     if (versionB) await rm(versionB, { recursive: true, force: true });
     report.finishedAt = new Date().toISOString();
+    report.status = outcome({ ok: report.ok });
     await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
   }
   for (const check of checks) console.log(`${check.ok ? "ok  " : "FAIL"} ${check.name}${check.ok ? "" : `: ${check.detail}`}`);

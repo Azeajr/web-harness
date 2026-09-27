@@ -9,13 +9,21 @@ import { observe, readState } from "./inspect.mjs";
 // sections, defaults, target and read. `policy` is the fault policy as JSON. `durable` is the
 // adapter's durable.read source (or "null"). `trace` is off, retain-on-failure or keep.
 //
-// The batch receives { step, assert, observe, state, effect, allowFault, expectFault }. On failure
+// The batch receives { step, assert, observe, state, effect, allowFault, expectFault, clock }. `clock`
+// drives the page clock and needs environment.clock "install" (or "fixed" for setFixedTime). On failure
 // it keeps a bundle under `${artifactBase}/bundle/`: the screenshot here, and the rest (network,
 // console, accessibility tree, storage, state) returned for the controller to write.
 export function batchSource(
   source,
   artifactBase,
-  { stateSpec = "{ sections: [], defaults: [] }", policy, durable = "null", trace = "off", batchId = "batch" } = {},
+  {
+    stateSpec = "{ sections: [], defaults: [] }",
+    policy,
+    durable = "null",
+    trace = "off",
+    batchId = "batch",
+    clockMode = "real",
+  } = {},
 ) {
   const expression = source.trim().replace(/;$/, "");
   new Script(`(${expression})`); // Reject malformed input before browser interactions.
@@ -36,6 +44,7 @@ export function batchSource(
     const durable = ${durable};
     const traceMode = ${JSON.stringify(trace)};
     const batchId = ${JSON.stringify(batchId)};
+    const clockMode = ${JSON.stringify(clockMode)};
     const base = ${JSON.stringify(artifactBase)};
     const context = page.context();
     const evidence = context.__webHarnessEvidence ?? null;
@@ -86,6 +95,24 @@ export function batchSource(
       if (problem) throw new Error(problem);
       return value;
     };
+    // Timers move only under an installed clock; say so instead of Playwright's generic error.
+    const needsInstall = (name, action) => async (...args) => {
+      if (clockMode !== 'install')
+        throw new Error('clock.' + name + ' needs environment.clock "install" (this session: ' + clockMode + ').');
+      return action(...args);
+    };
+    const clock = {
+      mode: clockMode,
+      runFor: needsInstall('runFor', (ms) => page.clock.runFor(ms)),
+      fastForward: needsInstall('fastForward', (ms) => page.clock.fastForward(ms)),
+      pauseAt: needsInstall('pauseAt', (time) => page.clock.pauseAt(new Date(time))),
+      resume: needsInstall('resume', () => page.clock.resume()),
+      setFixedTime: async (time) => {
+        if (clockMode === 'real') throw new Error('clock.setFixedTime needs environment.clock "fixed" or "install" (this session: real).');
+        return page.clock.setFixedTime(new Date(time));
+      },
+      now: () => page.evaluate(() => Date.now()),
+    };
     let tracing = false;
     if (traceMode !== 'off') {
       try { await context.tracing.start({ screenshots: true, snapshots: true, title: batchId }); tracing = true; }
@@ -96,7 +123,7 @@ export function batchSource(
       result = await (${expression})(page, {
         observe: (target, options) => observe(page, target, options),
         state: sections => readState(page, sections, stateSpec),
-        step, assert, effect, allowFault, expectFault,
+        step, assert, effect, allowFault, expectFault, clock,
       }) ?? null;
       // Require serializable results while still inside the evidence-capture boundary.
       JSON.stringify(result);

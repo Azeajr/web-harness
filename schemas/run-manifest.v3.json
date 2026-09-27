@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Azeajr/web-harness/schemas/run-manifest.v3.json",
+  "title": "web-harness session manifest, version 3",
+  "description": "The session manifest (.web-harness/<session>/session.json, copied to each run's manifest.json). src/manifest.mjs validates the same contract. `state` is the session's lifecycle; outcomes use the status vocabulary (passed, failed, infrastructure_failed, not_run, unsupported, flaky).",
+  "type": "object",
+  "required": ["schemaVersion", "project", "root", "session", "output", "target", "state", "runId", "runDir", "profileDir", "image", "imageId", "browser", "device", "descriptor", "limits", "driver", "timings", "seed", "attempts"],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "project": { "type": "string" },
+    "root": { "type": "string", "description": "Realpath of the project root." },
+    "session": { "type": "string" },
+    "output": { "type": "string" },
+    "token": { "type": "string", "description": "Ownership token. Never printed." },
+    "target": { "enum": ["dev", "production"] },
+    "state": { "enum": ["starting", "ready", "restarting", "resetting", "infrastructure-failed", "cleanup-failed", "stopped"] },
+    "workflow": { "type": "string" },
+    "trace": { "enum": [null, "off", "retain-on-failure", "keep"] },
+    "runId": { "type": "string" },
+    "runDir": { "type": "string" },
+    "profileDir": { "type": "string" },
+    "image": { "type": "string" },
+    "imageId": { "type": "string" },
+    "browser": { "type": "string" },
+    "device": { "type": "string" },
+    "descriptor": { "type": "object", "description": "The Playwright device descriptor: viewport, deviceScaleFactor, userAgent." },
+    "limits": {
+      "type": "object",
+      "required": ["containerMemory", "containerCpus", "serverHeapMb"],
+      "properties": {
+        "containerMemory": { "type": "string" },
+        "containerCpus": { "type": "string" },
+        "serverHeapMb": { "type": "number" },
+        "forcedResources": { "type": "boolean" }
+      }
+    },
+    "driver": {
+      "type": "object",
+      "required": ["playwright", "node"],
+      "properties": { "playwright": { "type": "string" }, "node": { "type": "string" } }
+    },
+    "timings": {
+      "type": "object",
+      "description": "Milliseconds per start phase.",
+      "required": ["preflight"],
+      "properties": {
+        "preflight": { "type": "number" },
+        "build": { "type": "number" },
+        "serverReady": { "type": "number" },
+        "container": { "type": "number" },
+        "initialize": { "type": "number" },
+        "total": { "type": "number" }
+      }
+    },
+    "seed": {
+      "type": "object",
+      "required": ["fixture", "target", "environment", "url", "digest"],
+      "properties": {
+        "fixture": { "type": "string" },
+        "target": { "enum": ["dev", "production"] },
+        "environment": {
+          "type": "object",
+          "required": ["clock"],
+          "properties": {
+            "timezoneId": { "type": ["string", "null"] },
+            "locale": { "type": ["string", "null"] },
+            "clock": { "enum": ["real", "fixed", "install"] },
+            "now": { "type": ["string", "null"] }
+          }
+        },
+        "url": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["commit", "branch", "dirty", "dirtyDigest"],
+      "properties": {
+        "commit": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "dirty": { "type": ["boolean", "null"] },
+        "dirtyDigest": { "type": ["string", "null"], "description": "sha256 of the uncommitted diff and untracked files; null when clean." }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "requested": { "type": "object" },
+        "effective": {
+          "type": "object",
+          "description": "Read back from the page, not assumed.",
+          "required": ["timezoneId", "locale", "now"]
+        }
+      }
+    },
+    "build": {
+      "type": ["object", "null"],
+      "properties": { "outDir": { "type": "string" }, "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+    },
+    "identity": { "type": ["object", "null"] },
+    "server": { "type": ["object", "null"], "description": "Owned server process: pid, startTicks, cmdline, cwd." },
+    "containerId": { "type": ["string", "null"] },
+    "hostEnvironment": {
+      "type": "object",
+      "properties": {
+        "isolated": { "type": "boolean" },
+        "home": { "type": ["string", "null"] },
+        "passed": { "type": "array", "items": { "type": "string" } },
+        "dropped": { "type": "number" }
+      }
+    },
+    "attempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["batchId", "sourceDigest", "status"],
+        "properties": {
+          "batchId": { "type": "string" },
+          "attemptId": { "type": "string" },
+          "scenarioId": { "type": ["string", "null"] },
+          "sourceDigest": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "status": { "enum": ["passed", "failed", "infrastructure_failed", "not_run", "unsupported", "flaky"] },
+          "error": { "type": ["string", "null"] },
+          "at": { "type": "string" }
+        }
+      }
+    },
+    "pendingReconciliation": { "type": ["object", "null"] },
+    "retainedFaults": { "type": "array" },
+    "infrastructureFaults": { "type": "array" },
+    "cleanup": {
+      "type": "object",
+      "properties": {
+        "status": { "enum": ["passed", "failed"] },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "at": { "type": "string" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind", "bytes", "truncated"],
+        "properties": {
+          "path": { "type": "string" },
+          "kind": { "enum": ["manifest", "events", "network", "console", "timeline", "faults", "state", "storage", "index", "report", "aria", "trace", "screenshot", "source", "other"] },
+          "bytes": { "type": "number" },
+          "truncated": { "type": "boolean", "description": "A bounded log that dropped older entries." }
+        }
+      }
+    }
+  }
+}

@@ -20,7 +20,7 @@ Every piece below serves a step of that loop. Where a piece cannot prove somethi
 | `productionServer`, `web-harness serve` | regress, explore | The built bundle with `public/_headers` applied and SPA fallback, like Pages. No Pages Functions, no edge. |
 | `web-harness smoke` | ship | This artifact's headers, bundle, SW control, persistence, offline reload — in Chromium. |
 | `web-harness e2e` | regress | The project's suite in the pinned image; the one place pixel baselines are compared. |
-| `web-harness scenarios` | ship | Each critical journey maps to a test that exists and (with results) passed — or says why not. |
+| `web-harness scenarios` | ship | Each critical journey maps to a test that exists and (with results) passed — or says why not — for a named source and build. |
 | `web-harness mutate` | regress | Stryker in a throwaway copy of the tree; never rewrites the checkout. |
 | `scope` / `setup` / `verdict` actions | ship | The required check always reports, and a skipped required lane fails it. |
 
@@ -42,7 +42,8 @@ export default defineHarness({
   state: { sections, defaults, read },  // read is SERIALIZED and runs in the page (dev only)
   durable: { read },                    // SERIALIZED, (page) => the app's persisted state; any target
   faults: { allowed, watchedWarnings, unservedPrefixes },
-  evidence: { trace, redact: { query } },
+  evidence: { trace, redact: { query }, uploadTraces },
+  environment: { timezoneId, locale, clock, now },  // sessions and harnessPlaywright
   smoke: { requiredHeaders, ready, persist, verify },
   e2e: { config, snapshots, prepare },
   scenarios: [...],
@@ -71,9 +72,11 @@ instead of inventing an answer: assert visible UI or durable storage there.
 ```sh
 web-harness preflight                    # Docker, pinned image, device, port — installs nothing
 web-harness start [--target production] [--fixture NAME] [--browser B --device D] [--port P]
-web-harness run FILE [--trace MODE]      # batched (page, {step, assert, observe, state, effect,
-                                         #   allowFault, expectFault}) => …
+                  [--timezone IANA --locale TAG --clock real|fixed|install --now ISO] [--trace MODE]
+web-harness run FILE [--trace MODE] [--scenario ID]  # batched (page, {step, assert, observe,
+                                         #   state, effect, allowFault, expectFault, clock}) => …
 web-harness effect --observe SEL … -- CLI  # diff what is watched around one CLI action
+web-harness reconcile                    # after a batch whose outcome is unknown
 web-harness observe SELECTOR | state     # compact JSON
 web-harness reload                       # same page, same storage
 web-harness restart                      # close and reopen on the SAME profile (durability)
@@ -86,6 +89,20 @@ web-harness cli <playwright-cli args>    # anything else, inside the owned sessi
   (checked by PID, start time, cwd and entry before it is ever signalled), a labelled container,
   and an identity token served at `/__web-harness/identity`. A replaced server on the same port,
   or another worktree's server, is refused rather than driven. `stop` removes only what it owns.
+- **Host environment.** The owned server (dev or static) does not inherit the developer's
+  environment: tool variables (`PATH`, `LANG`/`LC_*`, `npm_config_*`, `COREPACK_*`, `TZ`, …) and
+  whatever `dev.env` names pass; credentials (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, …)
+  never pass unless named exactly; `HOME` and the XDG directories live in the session and are
+  removed by `stop`. `dev.home: 'real'` opts out. The manifest records what passed.
+- **Environment.** `environment` (or `--timezone`, `--locale`, `--clock`, `--now`) sets the
+  browser's timezone and locale through the Playwright CLI's config and pins its clock on every
+  open — so `restart` keeps the same instant. `fixed` freezes `Date` while timers run; `install`
+  hands a batch the timers: its `clock` helper has `runFor(ms)`, `fastForward(ms | 'mm:ss')`,
+  `pauseAt(time)`, `resume()`, `setFixedTime(time)` and `now()`, and says which mode a call needs
+  rather than failing obscurely. What the page actually reports is read back into the manifest. The
+  environment is part of the seed digest: `reset` refuses a changed one. Worth running where a
+  product depends on local dates: US spring-forward (2026-03-08 02:00 local), fall-back
+  (2026-11-01 02:00 local), `Pacific/Kiritimati` (UTC+14) and `Pacific/Pago_Pago` (UTC−11).
 - **Targets.** `dev` runs the project's dev server with the Vite identity plugin. `production`
   builds into the session directory (the checkout's `dist/` is untouched), records the build's
   content digest, and serves it with the Pages-style server.
@@ -159,6 +176,25 @@ are never recorded — except in `trace.zip`, which Playwright writes with bodie
 asynchronous state read are not one moment, and the bundle says so. The batch's stdout carries the
 `summary` and the bundle path, so the first read is usually enough.
 
+- **Unknown outcomes.** A batch whose transport fails before any page-side report (a CLI timeout,
+  `WEB_HARNESS_CLI_TIMEOUT_MS`, default 180 s) may have mutated state. Its outcome is recorded as
+  `unknown`, and the next `run` is refused until `reconcile` captures the page's current state
+  beside that batch — or `run --after-unknown` says the caller knows.
+
+### The manifest and the status vocabulary
+
+`session.json` (and each run's `manifest.json`) is versioned: schema 3, documented in
+`schemas/run-manifest.v3.json`. It records the source (`commit`, `branch`, `dirty`, and a
+`dirtyDigest` over the uncommitted diff and untracked files), the build digest, the fixture/setup
+digest, the requested and the effective environment, the image, device, driver versions and
+resource limits, owned identities, start timings per phase, every batch attempt (with
+`scenarioId` from `run --scenario ID`), the cleanup outcome and an artifact index (each file's
+`kind`, size, and `truncated` when a bounded log dropped entries). A session's
+lifecycle is its `state` (`starting`, `ready`, …, `stopped`). Outcomes everywhere — batch, `effect`,
+`faults.json`, smoke `report.json`, `scenarios.json`, attempts — use one vocabulary: `passed`,
+`failed`, `infrastructure_failed` (the harness's transport or health failed, decided by where the
+failure came from, never by its message), `not_run`, `unsupported`, `flaky`.
+
 ### Completion evidence
 
 `--workflow` labels artifacts; it never runs a journey. A seeded screenshot or a zero-fault `check`
@@ -204,6 +240,18 @@ video on failure, `forbidOnly`, one retry in CI, and `failOnFlakyTests` in CI so
 turn a flaky test green. `createHarnessTest` attaches `network.jsonl` and `console.jsonl` to every
 failing test. `web-harness scenarios` reports a scenario whose test passed only on retry as
 `flaky` — a failure unless `--allow-flaky` — and keeps every attempt in `scenarios.json`.
+
+## Scenario reports name what they judged
+
+`scenarios.json` records the source it ran against (commit and dirty digest), the results file
+(by digest, with its Playwright version and start time) and the build. A lane cover
+(`{ lane: 'smoke' }`) is `held-by-verdict` — the CI verdict holds that required job to success —
+unless its report is given with `--lane smoke=.web-harness/smoke/report.json`; then the report
+must have passed. Build digests from every source that has one (`e2e --prebuilt` records the
+artifact's digest in `e2e-results.json`, the smoke report has its own, `--build-digest SHA` adds
+one) must agree: evidence about two different builds fails. Scenario statuses: `verified`,
+`verified-with-lane`, `held-by-verdict`, `flaky`, `mapped` (no results given), `unsupported`,
+`not-run`.
 
 ## Production smoke
 

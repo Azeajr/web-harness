@@ -74,7 +74,8 @@ $("confirm-delete").addEventListener("click", async () => {
 // that accepts HTML — fetch() sends Accept: */* — so this one asks for JSON only.
 $("break").addEventListener("click", async () => {
   console.error("induced failure");
-  const response = await fetch("/missing.json", { headers: { accept: "application/json" } }).catch(() => null);
+  // The token is redacted before it reaches any evidence.
+  const response = await fetch("/missing.json?token=example-secret", { headers: { accept: "application/json" } }).catch(() => null);
   await response?.text();
 });
 

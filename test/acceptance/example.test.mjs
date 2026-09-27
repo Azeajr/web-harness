@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { dockerIds, exec, lastJson, prepareExample } from "./example.mjs";
 
 // Real sessions, a real smoke and a real container E2E run against examples/minimal. Heavy: one
@@ -27,14 +28,14 @@ before(async () => {
 });
 
 after(async () => {
-  for (const session of ["accept", "prod", "interrupt"])
+  for (const session of ["accept", "prod", "interrupt", "env"])
     await example?.harness(["--session", session, "stop"]).catch(() => {});
   await example?.cleanup();
 });
 
 test("controller: a session's whole lifecycle, and the refusals that keep it owned", { timeout: 20 * 60_000 }, async (t) => {
   const { harness, readJson, root } = example;
-  const session = (args) => harness(["--session", "accept", ...args]);
+  const session = (args, options) => harness(["--session", "accept", ...args], options);
   const manifest = () => readJson(".web-harness/accept/session.json");
 
   await t.test("preflight launches the pinned image and reports the memory budget", async () => {
@@ -43,17 +44,43 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     const report = JSON.parse(result.stdout.slice(result.stdout.indexOf("{")));
     assert.match(report.imageId, /^sha256:/);
     assert.equal(typeof report.resources.ok, "boolean");
+    assert.equal(report.evidenceIgnored, true, "the example ignores .web-harness/");
   });
 
   await t.test("start seeds the fixture through the UI and records zero faults", async () => {
-    const result = await session(["start", "--fixture", "saved"]);
+    // A credential in the developer's environment must not reach the owned server.
+    const result = await session(["start", "--fixture", "saved"], {
+      env: { ...process.env, ACCEPTANCE_SECRET_TOKEN: "must-not-leak" },
+    });
     assert.equal(result.code, 0, result.stderr + result.stdout.slice(-3000));
     const current = await manifest();
-    assert.equal(current.status, "ready");
+    assert.equal(current.state, "ready");
     assert.equal(current.postconditions.applied.saved, "first note");
     assert.ok(await exists(path.join(current.runDir, "00-seeded.yml")));
     const faults = JSON.parse(await readFile(path.join(current.runDir, "faults.json"), "utf8"));
     assert.deepEqual(faults.faults, []);
+    assert.equal(faults.status, "passed");
+  });
+
+  await t.test("the manifest is a valid v3 record of source, driver, environment and host", async () => {
+    const current = await manifest();
+    const { validateManifest } = await import(
+      pathToFileURL(path.join(root, "node_modules/@azeajr/web-harness/src/manifest.mjs")).href
+    );
+    assert.deepEqual(validateManifest(current), []);
+    assert.match(current.source.commit, /^[0-9a-f]{40}$/);
+    assert.equal(current.driver.playwright, "1.63.0");
+    assert.deepEqual(
+      { timezoneId: current.environment.effective.timezoneId, locale: current.environment.effective.locale },
+      { timezoneId: "UTC", locale: "en-US" },
+    );
+    for (const phase of ["preflight", "serverReady", "container", "initialize", "total"])
+      assert.equal(typeof current.timings[phase], "number", phase);
+    assert.equal(current.hostEnvironment.isolated, true);
+    const environ = (await readFile(`/proc/${current.server.pid}/environ`, "utf8")).split("\0");
+    assert.ok(environ.includes(`HOME=${current.hostEnvironment.home}`), "HOME is the session's");
+    assert.ok(current.hostEnvironment.home.startsWith(path.join(root, ".web-harness/accept")));
+    assert.ok(!environ.some((entry) => entry.startsWith("ACCEPTANCE_SECRET_TOKEN=")), "the credential stayed out");
   });
 
   await t.test("a passing batch returns its steps and result as JSON", async () => {
@@ -61,6 +88,7 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.equal(result.code, 0, result.stdout + result.stderr);
     const report = lastJson(result.stdout);
     assert.equal(report.ok, true);
+    assert.equal(report.status, "passed");
     assert.deepEqual(report.steps.map((step) => step.name), ["type and save", "read back"]);
     assert.equal(report.result.note.text, "from a batch");
   });
@@ -108,14 +136,40 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.ok(faults.records.some((record) => record.excusedBy && /induced failure/.test(record.detail)), "kept as evidence");
   });
 
+  await t.test("after a batch whose outcome is unknown, runs wait for reconcile", async () => {
+    const timedOut = await session(["run", "batches/slow.js"], {
+      env: { ...process.env, WEB_HARNESS_CLI_TIMEOUT_MS: "3000" },
+    });
+    assert.equal(timedOut.code, 1);
+    const report = lastJson(timedOut.stdout);
+    assert.equal(report.outcome, "unknown");
+    assert.equal(report.status, "infrastructure_failed");
+    const refused = await session(["run", "batches/save.js"]);
+    assert.equal(refused.code, 1);
+    assert.match(lastJson(refused.stdout).error, /outcome of batch .* is unknown/);
+    const reconciled = await session(["reconcile"]);
+    assert.equal(reconciled.code, 0, reconciled.stdout + reconciled.stderr);
+    const summary = lastJson(reconciled.stdout);
+    assert.equal(summary.reconciled, report.batchId);
+    assert.ok(await exists(path.join(summary.directory, "index.json")));
+    assert.equal((await manifest()).pendingReconciliation, null);
+    const again = await session(["run", "batches/save.js"]);
+    assert.equal(again.code, 0, again.stdout);
+  });
+
   await t.test("a batch that faults fails, keeping the original error and a full bundle", async () => {
     const result = await session(["run", "batches/break.js", "--trace", "retain-on-failure"]);
     assert.equal(result.code, 1);
     const report = lastJson(result.stdout);
     assert.equal(report.ok, false);
+    assert.equal(report.status, "failed");
     assert.match(report.error, /retained browser fault/);
     assert.ok(await exists(report.faultsReport), "faults.json");
     const bundle = report.summary.bundle;
+    // The query token is redacted in every piece of evidence.
+    assert.match(report.error + JSON.stringify(report.faults), /token=\[redacted\]/);
+    for (const file of ["network.jsonl", "console.jsonl", "timeline.jsonl", "faults.json", "index.json", "storage.json"])
+      assert.doesNotMatch(await readFile(path.join(bundle, file), "utf8"), /example-secret/, `${file} leaks the token`);
     for (const file of ["index.json", "network.jsonl", "console.jsonl", "aria.yml", "storage.json", "timeline.jsonl", "faults.json", "screenshot.png", "trace.zip"])
       assert.ok(await exists(path.join(bundle, file)), `bundle has ${file}`);
     const lines = async (file) => (await readFile(path.join(bundle, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -218,10 +272,18 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
   });
 
   await t.test("stop removes exactly what the session owned", async () => {
-    const { server } = await manifest();
+    const { server, hostEnvironment } = await manifest();
     const result = await session(["stop"]);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal((await manifest()).status, "stopped");
+    const stopped = await manifest();
+    assert.equal(stopped.state, "stopped");
+    assert.equal(stopped.cleanup.status, "passed");
+    assert.ok(stopped.artifacts.some((artifact) => artifact.path === "00-seeded.yml" && artifact.kind === "aria"));
+    const { validateManifest } = await import(
+      pathToFileURL(path.join(root, "node_modules/@azeajr/web-harness/src/manifest.mjs")).href
+    );
+    assert.deepEqual(validateManifest(stopped), []);
+    assert.equal(await exists(hostEnvironment.home), false, "the session's HOME is removed");
     assert.deepEqual(await dockerIds(`label=web-harness.root=${root}`), []);
     assert.equal(await exists(leaseFile(4191)), false);
     assert.equal(alive(server.pid), false);
@@ -254,7 +316,40 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.notEqual(await exited, 0);
     assert.deepEqual(await dockerIds("label=web-harness.session=interrupt"), []);
     assert.equal(await exists(leaseFile(4196)), false);
-    assert.equal((await readJson(".web-harness/interrupt/session.json")).status, "stopped");
+    assert.equal((await readJson(".web-harness/interrupt/session.json")).state, "stopped");
+  });
+
+  await t.test("a session's timezone, locale and pinned clock hold across a restart", async () => {
+    const env = (args) => harness(["--session", "env", ...args]);
+    const started = await env([
+      "start", "--port", "4197", "--fixture", "blank",
+      "--timezone", "Pacific/Kiritimati", "--locale", "en-GB", "--clock", "fixed", "--now", "2026-03-08T06:59:00Z",
+    ]);
+    assert.equal(started.code, 0, started.stderr + started.stdout.slice(-2000));
+    const current = await readJson(".web-harness/env/session.json");
+    assert.equal(current.environment.effective.timezoneId, "Pacific/Kiritimati");
+    assert.equal(current.environment.effective.locale, "en-GB");
+    assert.match(current.environment.effective.now, /^2026-03-08T06:59:00/);
+    assert.equal((await env(["restart"])).code, 0);
+    const probe = await env(["cli", "eval", "() => Intl.DateTimeFormat().resolvedOptions().timeZone + '|' + new Date().toISOString()"]);
+    assert.match(probe.stdout, /Pacific\/Kiritimati\|2026-03-08T06:59:00/, probe.stdout.slice(-1000));
+    assert.equal((await env(["stop"])).code, 0);
+  });
+
+  await t.test("an installed clock survives a restart and moves only when a batch moves it", async () => {
+    const clock = (args) => harness(["--session", "clock", ...args]);
+    const started = await clock([
+      "start", "--port", "4198", "--fixture", "blank",
+      "--timezone", "Pacific/Kiritimati", "--clock", "install", "--now", "2026-03-08T06:59:00Z",
+    ]);
+    assert.equal(started.code, 0, started.stderr + started.stdout.slice(-2000));
+    assert.equal((await readJson(".web-harness/clock/session.json")).environment.requested.clock, "install");
+    assert.equal((await clock(["restart"])).code, 0);
+    const moved = await clock(["run", "batches/clock.js"]);
+    assert.equal(moved.code, 0, moved.stdout.slice(-2000));
+    const report = JSON.parse(moved.stdout);
+    assert.deepEqual(report.result, { now: "2026-03-08T07:31:00.000Z", timeZone: "Pacific/Kiritimati" });
+    assert.equal((await clock(["stop"])).code, 0);
   });
 });
 
@@ -280,6 +375,7 @@ test("smoke: passes the example build, and fails each broken variant in the righ
   await t.test("the real build passes every phase", async () => {
     const { code, report } = await smoke("dist", "ok");
     assert.equal(code, 0, JSON.stringify(report.checks));
+    assert.equal(report.status, "passed");
     assert.deepEqual(report.checks.map((check) => check.name), ["headers", "bundle", "globals", "sw", "persist", "offline", "online", "update", "faults"]);
     const update = report.checks.find((check) => check.name === "update").detail;
     assert.deepEqual(update, { mode: "prompt", detected: true, consent: true, dismissed: "prompt returned after a reload", activated: true, navigations: 1 });
@@ -370,10 +466,20 @@ test("e2e: the suite runs in the pinned container and the scenario join verifies
   assert.equal(run.code, 0, run.stderr + run.stdout.slice(-4000));
   const results = await readJson("e2e-results.json");
   assert.ok(results.config.rootDir.startsWith(root), `not rehomed: ${results.config.rootDir}`);
-  const scenarios = await harness(["scenarios", "--results", "e2e-results.json"]);
+  // The smoke test above left a passing report; given as the lane's report, it verifies the lane.
+  const scenarios = await harness(["scenarios", "--results", "e2e-results.json", "--lane", "smoke=.web-harness/smoke-ok/report.json"]);
   assert.equal(scenarios.code, 0, scenarios.stderr + scenarios.stdout);
   assert.match(scenarios.stdout, /verified\s+save-note/);
+  assert.match(scenarios.stdout, /verified\s+offline-install/);
   assert.match(scenarios.stdout, /unsupported\s+installed-phone/);
+  const report = await readJson(".web-harness/scenarios.json");
+  assert.equal(report.status, "passed");
+  assert.match(report.source.commit, /^[0-9a-f]{40}$/);
+  assert.match(report.results.digest, /^[0-9a-f]{64}$/);
+  // The same suite in another timezone and locale.
+  const zoned = await harness(["e2e", "--timezone", "Pacific/Kiritimati", "--locale", "en-GB", "--grep", "timezone"]);
+  assert.equal(zoned.code, 0, zoned.stderr + zoned.stdout.slice(-3000));
+  assert.equal((await readJson("e2e-results.json")).webHarness.timezone, "Pacific/Kiritimati");
 });
 
 test("playwright: a failing test carries the network and console evidence", { timeout: 10 * 60_000 }, async () => {

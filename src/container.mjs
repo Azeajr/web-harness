@@ -3,7 +3,7 @@ import { access, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "no
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
-import { imageFor, run } from "./core.mjs";
+import { directoryDigest, imageFor, run } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
 import { checkBudget, describeBudget, parseSize } from "./resources.mjs";
 
@@ -59,16 +59,23 @@ export function e2eArguments(argv) {
   // tell the suite not to rebuild it, so the container tests the bytes that ship.
   const prebuiltIndex = argv.indexOf("--prebuilt");
   const prebuilt = prebuiltIndex >= 0 ? argv[prebuiltIndex + 1] : null;
-  if (prebuiltIndex >= 0 && (!prebuilt || prebuilt.startsWith("--")))
-    throw new Error("--prebuilt needs a directory.");
+  // --timezone / --locale: the whole suite in another environment (harnessPlaywright reads them).
+  const valued = new Map();
+  for (const name of ["--prebuilt", "--timezone", "--locale"]) {
+    const index = argv.indexOf(name);
+    if (index < 0) continue;
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${name} needs a ${name === "--prebuilt" ? "directory" : "value"}.`);
+    valued.set(index, name).set(index + 1, name);
+  }
   return {
     updateSnapshots: argv.includes("--update-snapshots"),
     forceResources: argv.includes("--force-resources"),
     prebuilt,
+    timezone: argv.includes("--timezone") ? argv[argv.indexOf("--timezone") + 1] : null,
+    locale: argv.includes("--locale") ? argv[argv.indexOf("--locale") + 1] : null,
     playwrightArgs: argv.filter(
-      (arg, index) =>
-        !["--update-snapshots", "--force-resources"].includes(arg) &&
-        (prebuiltIndex < 0 || (index !== prebuiltIndex && index !== prebuiltIndex + 1)),
+      (arg, index) => !["--update-snapshots", "--force-resources"].includes(arg) && !valued.has(index),
     ),
   };
 }
@@ -83,7 +90,8 @@ export async function main(argv) {
     report: "playwright-report",
     ...config.e2e,
   };
-  const { updateSnapshots, prebuilt, forceResources, playwrightArgs } = e2eArguments(argv);
+  const { updateSnapshots, prebuilt, forceResources, timezone, locale, playwrightArgs } = e2eArguments(argv);
+  const buildDigest = prebuilt ? await directoryDigest(path.resolve(root, prebuilt)) : null;
   const dockerOutput = (args) => run("docker", args, { cwd: root });
   const require = createRequire(path.join(config.playwrightFrom, "package.json"));
   const playwrightVersion = require("playwright/package.json").version;
@@ -217,6 +225,8 @@ export async function main(argv) {
   async function copyReport() {
     try {
       const report = JSON.parse(await readFile(path.join(workspace, "e2e-results.json"), "utf8"));
+      // Which bytes these results are about: the prebuilt artifact's digest, when there was one.
+      report.webHarness = { buildDigest, prebuilt, timezone, locale };
       await writeFile(
         path.join(root, "e2e-results.json"),
         JSON.stringify(rehomeResults(report, root), null, 2) + "\n",
@@ -291,6 +301,8 @@ export async function main(argv) {
         "-e",
         `PLAYWRIGHT_JSON_OUTPUT_NAME=${CONTAINER_WORKSPACE}/e2e-results.json`,
         ...(prebuilt ? ["-e", "WEB_HARNESS_PREBUILT=1"] : []),
+        ...(timezone ? ["-e", `WEB_HARNESS_TIMEZONE=${timezone}`] : []),
+        ...(locale ? ["-e", `WEB_HARNESS_LOCALE=${locale}`] : []),
         "-e",
         "HOME=/tmp",
         "-e",

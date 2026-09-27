@@ -66,7 +66,10 @@ export function validateConfig(raw, root) {
   config.defaults = { browser: "chromium", device: "Desktop Chrome", ...raw.defaults };
   if (typeof raw.dev?.command !== "function") throw new Error("dev.command(port) is required.");
   argv(raw.dev.command(config.port), "dev.command(port)");
-  config.dev = { cwd: ".", marker: "/@vite/client", ...raw.dev };
+  config.dev = { cwd: ".", marker: "/@vite/client", env: [], home: "isolated", ...raw.dev };
+  if (!Array.isArray(config.dev.env) || config.dev.env.some((name) => typeof name !== "string"))
+    throw new Error("dev.env must be an array of variable names (a trailing * matches a prefix).");
+  if (!["isolated", "real"].includes(config.dev.home)) throw new Error('dev.home must be "isolated" or "real".');
   if (raw.production) {
     if (typeof raw.production.build !== "function")
       throw new Error("production.build(outDir) is required when production is configured.");
@@ -92,6 +95,7 @@ export function validateConfig(raw, root) {
     throw new Error("state.defaults must be registered sections.");
   config.policy = faultPolicy(raw.faults);
   config.evidence = evidenceConfig(raw.evidence);
+  config.environment = environmentConfig(raw.environment);
   if (raw.durable !== undefined) {
     if (typeof raw.durable?.read !== "function") throw new Error("durable.read(page) must be a function.");
     functionSource(raw.durable.read, "durable.read");
@@ -134,11 +138,48 @@ export function evidenceConfig(raw = {}) {
     new RegExp(text);
     return text;
   });
+  if (raw.uploadTraces !== undefined && typeof raw.uploadTraces !== "boolean")
+    throw new Error("evidence.uploadTraces must be a boolean.");
   return {
     trace,
     redactQuery: [...DEFAULT_REDACT_QUERY, ...sources],
     requestCap: raw.requestCap ?? 2000,
     consoleCap: raw.consoleCap ?? 1000,
+    // Traces carry request and response bodies and headers. CI uploads them only when this is set.
+    uploadTraces: raw.uploadTraces ?? false,
+  };
+}
+
+export const CLOCK_MODES = ["real", "fixed", "install"];
+
+// The environment a session's browser (and a suite, through harnessPlaywright) runs in. Command
+// options (--timezone, --locale, --now, --clock) override it per session.
+export function environmentConfig(raw = {}, overrides = {}) {
+  const merged = { clock: "real", ...raw, ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)) };
+  if (!CLOCK_MODES.includes(merged.clock)) throw new Error(`environment.clock must be ${CLOCK_MODES.join(", ")}.`);
+  if (merged.clock !== "real") {
+    if (!merged.now || Number.isNaN(Date.parse(merged.now)))
+      throw new Error(`environment.clock "${merged.clock}" needs environment.now as an ISO date.`);
+  }
+  if (merged.timezoneId !== undefined) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: merged.timezoneId });
+    } catch {
+      throw new Error(`Unknown timezone ${merged.timezoneId}.`);
+    }
+  }
+  if (merged.locale !== undefined) {
+    try {
+      new Intl.Locale(merged.locale);
+    } catch {
+      throw new Error(`Invalid locale ${merged.locale}.`);
+    }
+  }
+  return {
+    timezoneId: merged.timezoneId ?? null,
+    locale: merged.locale ?? null,
+    clock: merged.clock,
+    now: merged.clock === "real" ? null : new Date(merged.now).toISOString(),
   };
 }
 

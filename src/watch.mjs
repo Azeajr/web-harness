@@ -27,7 +27,8 @@ export async function watchContext(
     page.on("pageerror", (error) => record("pageerror", `${error.name}: ${error.message}`));
     page.on("crash", () => record("crash", "Browser page crashed"));
     page.on("console", (message) => {
-      const detail = describeConsole(message.text(), message.location());
+      const location = message.location();
+      const detail = describeConsole(message.text(), location?.url ? { ...location, url: redact(location.url) } : location);
       const kind = consoleKind(message.type(), detail, policy);
       // The browser's own "Failed to load resource" line for an unserved path is the same event as
       // the 404 excused below, not a second fault.
@@ -36,6 +37,7 @@ export async function watchContext(
       else if (kind) record(kind, detail);
     });
   };
+  const redact = (url) => redactUrl(url, evidence.redactQuery ?? []);
   // Without an app origin to compare with, anything not on localhost is external.
   const external = (url) =>
     origin
@@ -52,19 +54,19 @@ export async function watchContext(
     const sw = request.serviceWorker?.() ? "sw " : "";
     record(
       "requestfailed",
-      `${sw}${request.method()} ${request.url()}: ${request.failure()?.errorText}`,
+      `${sw}${request.method()} ${redact(request.url())}: ${request.failure()?.errorText}`,
     );
   });
   target.on("response", (response) => {
     if (!origin || new URL(response.url()).origin !== origin) return;
     if (isUnserved(response.url(), origin, policy)) return;
     if (response.status() >= policy.httpErrorStatus)
-      record("http", `${response.status()} ${response.url()}`);
+      record("http", `${response.status()} ${redact(response.url())}`);
   });
   await target.route(
     (url) => external(url.href),
     async (route) => {
-      const detail = `${route.request().method()} ${route.request().url()}`;
+      const detail = `${route.request().method()} ${redact(route.request().url())}`;
       if (policy.external === "fault") record("external", detail);
       else warn(`external (stubbed): ${detail}`);
       await route.fulfill(STUB_EXTERNAL);
