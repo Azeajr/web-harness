@@ -81,6 +81,9 @@ export default defineHarness({
       }),
   },
   faults: { unservedPrefixes: ["/api/"] },
+  // check --a11y, checkA11y in tests and the smoke's a11y phase: serious and critical axe
+  // violations fail; lesser ones are warnings.
+  a11y: { impact: "serious" },
   smoke: {
     // Per path, by value: a CSP that stopped restricting scripts, or a long-cached service worker
     // script, is a regression even though the header is still "there".
@@ -106,12 +109,18 @@ export default defineHarness({
       dismiss: (page) => page.getByRole("button", { name: "Later" }).click(),
     },
   },
-  e2e: { config: "playwright.config.js", snapshots: [] },
+  e2e: { config: "playwright.config.js", snapshots: [], fixtures: "tests/e2e/fixtures.js" },
   scenarios: [
     {
       id: "save-note",
       title: "Save a note and still see it after a reload",
-      covers: [{ file: "tests/e2e/notes.spec.js", test: "saves a note that survives a reload" }],
+      covers: [
+        { file: "tests/e2e/notes.spec.js", test: "saves a note that survives a reload" },
+        // Written by: web-harness promote batches/effects.js --to tests/e2e/promoted.spec.js
+        //   --title "a save changes the note and a cancel changes nothing" --fixture blank
+        //   --scenario save-note
+        { file: "tests/e2e/promoted.spec.js", test: "a save changes the note and a cancel changes nothing" },
+      ],
     },
     {
       id: "offline-install",

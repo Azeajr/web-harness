@@ -42,6 +42,7 @@ import {
   resultJson,
   run,
   slug,
+  toolCommands,
 } from "./core.mjs";
 import {
   STUB_EXTERNAL,
@@ -72,13 +73,15 @@ import {
 } from "./evidence.mjs";
 import { observe, readState } from "./inspect.mjs";
 import { environmentConfig, functionSource, loadConfig } from "./config.mjs";
+import { A11Y_BOUNDARY, a11yConfig, axeLoaderSource, axeSource, classifyA11y, runAxe } from "./a11y.mjs";
 import { applyClock } from "./clock.mjs";
 import { serverEnvironment } from "./hostenv.mjs";
 import { SCHEMA_VERSION, artifactKind } from "./manifest.mjs";
 import { sourceIdentity } from "./provenance.mjs";
 import { STATUS, outcome } from "./status.mjs";
 import { checkBudget, describeBudget, formatSize, parseSize } from "./resources.mjs";
-import { describeDrift, versionDrift } from "./versions.mjs";
+import { describeDrift, ownVersion, versionDrift } from "./versions.mjs";
+import { describeSkillDrift, installedSkills } from "./skill.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverEntry = await realpath(path.join(here, "server.mjs"));
@@ -157,7 +160,9 @@ Usage: web-harness [--session NAME] <command> [options]
   restart         Close and reopen the browser on the SAME persistent profile (durability proof)
   reset           Recreate the browser profile and replay the same fixture in a new run directory
   screenshot LABEL [--full-page] [--hires]  Save a numbered PNG at a printed absolute host path
-  check           Retain/write faults.json; exit 1 for runtime, network or layout faults
+  check [--a11y] [--a11y-impact LEVEL] [--a11y-disable RULE,...]
+                  Retain/write faults.json; exit 1 for runtime, network or layout faults (and, with
+                  --a11y, axe violations at or above the impact; needs axe-core in the project)
   status          Print ownership, artifacts, and next commands
   stop            Close session and remove only owned container/server; retain artifacts
   cli <args...>   Run arbitrary Playwright CLI commands inside the owned session
@@ -165,12 +170,15 @@ Usage: web-harness [--session NAME] <command> [options]
   state           Read the app's development state accessor as compact JSON (dev target only)
   run REPO_FILE [--trace off|retain-on-failure|keep] [--scenario ID] [--after-unknown]
                   Batch trusted async (page, {step, assert, observe, state, effect, allowFault,
-                  expectFault}) => {...}; JSON result; a failure keeps a bundle (network, console,
-                  accessibility tree, storage, state, timeline, trace when on)
+                  expectFault, clock}) => {...}; JSON result; a failure keeps a bundle (network,
+                  console, accessibility tree, storage, state, timeline, trace when on)
   effect [--observe SEL]... [--state a,b] [--durable] [--until SEL] [--expect change|none] -- <cli command>
+                  Read what is watched, run one CLI action, settle, read again: JSON diff
   reconcile       After a batch whose outcome is unknown (a transport timeout): capture the
                   current state beside it and allow runs again (or pass run --after-unknown)
-                  Read what is watched, run one CLI action, settle, read again: JSON diff
+  describe [--json]  This project as an agent needs it: fixtures, state, scenarios, targets, commands
+Tools: serve, smoke, e2e, scenarios, mutate, digest, promote BATCH --to SPEC --title T,
+  skill install [--dir .claude/skills|.agents/skills]
 
 Start/preflight: --target dev|production (default dev) --fixture NAME
   --browser ${config.defaults.browser} --device "${config.defaults.device}"
@@ -187,6 +195,68 @@ Reset refuses changed fixture/setup digests; use stop/start to establish a chang
 No host browser, no silent browser fallback. Exit 0: success; exit 1: invalid input, failed
 preflight, fault, ownership, or cleanup check.
 Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
+  }
+
+  // What an agent needs about this project, machine-readable, read from the config: the skill
+  // tells an agent to run this first instead of guessing fixture names or ports.
+  async function describe() {
+    const describeFixture = ([name, fixture]) => ({
+      name,
+      description: fixture.description ?? null,
+      default: name === config.defaultFixture,
+      seeds: Boolean(fixture.apply),
+    });
+    const smoke = config.smoke ?? {};
+    const hooks = [
+      ...["ready", "persist", "verify", "reconnect"].filter((hook) => typeof smoke[hook] === "function"),
+      ...(smoke.update && typeof smoke.update === "object"
+        ? ["prompt", "accept", "dismiss", "build"].filter((hook) => typeof smoke.update[hook] === "function").map((hook) => `update.${hook}`)
+        : []),
+    ];
+    const report = {
+      project: config.name,
+      root,
+      webHarness: ownVersion,
+      targets: ["dev", ...(config.production ? ["production"] : [])],
+      port: config.port,
+      defaults: config.defaults,
+      fixtures: Object.entries(config.fixtures).map(describeFixture),
+      options: config.options,
+      state: { sections: config.state.sections, defaults: config.state.defaults, accessor: Boolean(config.state.read) },
+      durable: Boolean(config.durable?.read),
+      environment: config.environment,
+      evidence: { trace: config.evidence.trace, uploadTraces: config.evidence.uploadTraces },
+      a11y: config.a11y,
+      scenarios: config.scenarios.map((scenario) => ({
+        id: scenario.id,
+        title: scenario.title,
+        status: scenario.status ?? "mapped",
+        reason: scenario.reason ?? null,
+        covers: scenario.covers ?? [],
+      })),
+      e2e: {
+        config: config.e2e?.config ?? "playwright.config.ts",
+        fixtures: config.e2e?.fixtures ?? null,
+        snapshots: config.e2e?.snapshots ?? ["tests/e2e"],
+      },
+      smoke: {
+        hooks,
+        requiredHeaders: Boolean(smoke.requiredHeaders),
+        update: smoke.update === false ? "off" : (smoke.update?.mode ?? "prompt"),
+      },
+      skills: await installedSkills(root),
+      commands: {
+        session: commands,
+        tools: Object.keys(toolCommands),
+      },
+      next: [
+        "web-harness doctor",
+        `web-harness start --fixture ${config.defaultFixture}`,
+        "web-harness run batches/<journey>.js",
+        "web-harness stop",
+      ],
+    };
+    console.log(JSON.stringify(report, null, 2));
   }
 
   async function save() {
@@ -785,6 +855,8 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     if (resources.forced) console.error(describeBudget(resources, "Session (forced)"));
     const drift = await versionDrift(root);
     for (const warning of describeDrift(drift)) console.error(`warning: ${warning}`);
+    const skills = await installedSkills(root);
+    for (const warning of describeSkillDrift(skills)) console.error(`warning: ${warning}`);
     // Evidence can hold private data (traces carry bodies); it must never be committed.
     const evidenceDirectory = path.relative(root, await resolvePath(root, options.output ?? ".web-harness", { outside: Boolean(options.output) }));
     const evidenceIgnored =
@@ -813,7 +885,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         swap: formatSize(resources.swap),
         running: resources.containers.map((container) => container.name),
       },
-      webHarness: { version: drift.version, workflowMismatches: drift.mismatches.length },
+      webHarness: { version: drift.version, workflowMismatches: drift.mismatches.length, skills },
       evidenceIgnored,
     };
     console.log(JSON.stringify(report, null, 2));
@@ -986,7 +1058,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     ];
   }
 
-  async function check({ throwOnFault = true } = {}) {
+  async function check({ throwOnFault = true, a11y = null } = {}) {
     let collected;
     let deferred = false;
     try {
@@ -1022,12 +1094,25 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         `${item.role} "${item.name}" renders outside the ${item.viewport.width}x${item.viewport.height} ` +
         `viewport (edges left=${item.rect.left} top=${item.rect.top} right=${item.rect.right} bottom=${item.rect.bottom}).`,
     }));
+    // An accessibility scan measures the page as it is now: its findings belong to this check,
+    // not to the session's retained fault history.
+    let scan = null;
+    if (a11y) {
+      const source = await axeSource(root);
+      scan = await code(
+        async (page, settings, lib) => lib.classify(await lib.runAxe(page, settings, lib.loadAxe), settings),
+        a11y,
+        `{ runAxe: ${runAxe}, classify: ${classifyA11y}, loadAxe: ${axeLoaderSource(source)} }`,
+      );
+      collected.warnings = [...(collected.warnings ?? []), ...scan.warnings];
+    }
     const records = [
       // Faults from browser lifetimes that `restart` closed. A restart must not launder them.
       ...(manifest.retainedFaults ?? []),
       ...(collected.records ?? []),
       ...overflowRecords,
       ...(manifest.infrastructureFaults ?? []),
+      ...(scan?.faults ?? []),
     ];
     const faults = failures(records, config.policy);
     const report = path.join(manifest.runDir, "faults.json");
@@ -1045,6 +1130,9 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
           // the retained ones.
           live: collected.records ?? [],
           warnings: collected.warnings ?? [],
+          a11y: scan
+            ? { impact: a11y.impact, disabled: a11y.disable, faults: scan.faults.length, warnings: scan.warnings.length, boundary: A11Y_BOUNDARY }
+            : null,
         },
         null,
         2,
@@ -1302,6 +1390,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       outside: Boolean(options.output),
     });
     if (command === "preflight" || command === "doctor") return preflight(options);
+    if (command === "describe") return describe();
     const directory = await resolvePath(root, path.join(output, session), { outside: true });
     await mkdir(directory, { recursive: true });
     manifestPath = path.join(directory, "session.json");
@@ -1528,7 +1617,16 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     } else if (command === "restart") await restart();
     else if (command === "reload") await reload();
     else if (command === "screenshot") await screenshot(positional[0] ?? "state", options);
-    else if (command === "check") await check();
+    else if (command === "check")
+      await check({
+        a11y:
+          options.a11y || options["a11y-impact"] || options["a11y-disable"]
+            ? a11yConfig(config.a11y ?? {}, {
+                impact: options["a11y-impact"],
+                disable: options["a11y-disable"]?.split(",").filter(Boolean),
+              })
+            : null,
+      });
     else if (command === "cli") {
       assertCliAllowed(positional);
       console.log(await cli(positional));

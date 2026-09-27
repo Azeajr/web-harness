@@ -6,6 +6,9 @@ Shared development and verification harness for offline-first Vite PWAs on Cloud
   Playwright Docker image; fixtures applied through the real UI; batched journeys returning compact
   JSON; `restart` on the same profile to prove durability.
 - **One fault policy** for exploration and for the Playwright suite (`createHarnessTest`).
+- **Agent ergonomics** — a shipped agent skill (`web-harness skill install`), `describe --json`,
+  `promote` to turn a reproducing batch into an ordinary test, and an axe-core accessibility scan
+  (`check --a11y`, `checkA11y`, the smoke's `a11y` phase).
 - **Production proof** — a Pages-style static server (`_headers` applied, SPA fallback) and a smoke
   that checks header values, bundle, service worker, persistence, offline and online reloads, and
   the update of an installed client to a new version.
@@ -22,8 +25,9 @@ Used by chess-mcp, chorequest, tabletop-strategy-companion and training-log. Rea
 pnpm add -D github:Azeajr/web-harness#v0.1.4   # or: npm i -D github:Azeajr/web-harness#v0.1.4
 ```
 
-Peer dependency: `playwright` (≥ 1.62; the Docker image is matched to your version). The Vite plugin
-imports nothing from Vite and fits any major.
+Peer dependency: `playwright` (≥ 1.62; the Docker image is matched to your version). Optional:
+`axe-core` (≥ 4.10) for the accessibility scan. The Vite plugin imports nothing from Vite and fits
+any major.
 
 ```ts
 // vite.config.ts
@@ -54,8 +58,11 @@ export const test = createHarnessTest(base, harness)
 
 ```
 web-harness preflight | start | run FILE | observe SEL | state | effect … -- CLI | reload
-            restart | reset | reconcile | screenshot LABEL | check | status | stop | cli ...
-                                                                     (agent sessions)
+            restart | reset | reconcile | screenshot LABEL | check [--a11y] | status | stop
+            cli ... | describe --json                                (agent sessions)
+web-harness skill install [--dir .claude/skills|.agents/skills]      (agent skill)
+web-harness promote BATCH --to SPEC --title T [--fixture F] [--scenario ID]
+                                                                     (batch → Playwright test)
 web-harness serve --dir dist --port N [--unserved /api/]             (Pages-style server)
 web-harness smoke [--dist DIR]                                       (production smoke)
 web-harness e2e [--update-snapshots] [--prebuilt DIR] [--timezone Z --locale L] [pw args]

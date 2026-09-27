@@ -17,6 +17,9 @@ Every piece below serves a step of that loop. Where a piece cannot prove somethi
 | `effect` (batch helper and command) | observe | What changed around one action — and that something did. Sequential reads, not one atomic snapshot. |
 | failure bundles | keep evidence | Every request and console line (bounded, redacted), the accessibility tree, storage and service-worker state, a merged timeline, optionally a trace. |
 | `createHarnessTest` (`/playwright`) | regress | The same fault policy as a session, in the project's Playwright suite. |
+| `promote`, `applyHarnessFixture`, `batchHelpers` | regress | A batch that reproduced something becomes a test that seeds and runs the same way. |
+| `check --a11y`, `checkA11y`, smoke `a11y` | observe, ship | axe-core rules on the page as it is. A subset of WCAG problems: a clean scan is not an audit. |
+| skill, `describe --json` | orient | What the harness is and what this project registers, for an agent starting cold. |
 | `productionServer`, `web-harness serve` | regress, explore | The built bundle with `public/_headers` applied and SPA fallback, like Pages. No Pages Functions, no edge. |
 | `web-harness smoke` | ship | This artifact's headers, bundle, SW control, persistence, offline reload — in Chromium. |
 | `web-harness e2e` | regress | The project's suite in the pinned image; the one place pixel baselines are compared. |
@@ -44,8 +47,9 @@ export default defineHarness({
   faults: { allowed, watchedWarnings, unservedPrefixes },
   evidence: { trace, redact: { query }, uploadTraces },
   environment: { timezoneId, locale, clock, now },  // sessions and harnessPlaywright
+  a11y: { impact, disable, include, exclude },       // check --a11y, checkA11y, smoke
   smoke: { requiredHeaders, ready, persist, verify },
-  e2e: { config, snapshots, prepare },
+  e2e: { config, snapshots, prepare, fixtures },
   scenarios: [...],
 })
 ```
@@ -81,8 +85,9 @@ web-harness observe SELECTOR | state     # compact JSON
 web-harness reload                       # same page, same storage
 web-harness restart                      # close and reopen on the SAME profile (durability)
 web-harness reset                        # new profile, same fixture digest, new run directory
-web-harness screenshot LABEL [--full-page] | check | status | stop
+web-harness screenshot LABEL [--full-page] | check [--a11y] | status | stop
 web-harness cli <playwright-cli args>    # anything else, inside the owned session
+web-harness describe --json              # fixtures, state, scenarios, targets, hooks, commands
 ```
 
 - **Ownership.** Each session owns a port lease (host-wide, across projects), a server process
@@ -198,6 +203,24 @@ lifecycle is its `state` (`starting`, `ready`, …, `stopped`). Outcomes everywh
 `failed`, `infrastructure_failed` (the harness's transport or health failed, decided by where the
 failure came from, never by its message), `not_run`, `unsupported`, `flaky`.
 
+### Accessibility
+
+`check --a11y` (with `--a11y-impact LEVEL` and `--a11y-disable RULE,…` for one run), the
+`checkA11y` fixture in tests, and the smoke's `a11y` phase run axe-core — the project's own
+`axe-core` dependency — on the page as it is, configured by the adapter:
+
+```js
+a11y: { impact: 'serious', disable: ['color-contrast'], include: ['main'], exclude: [] }
+```
+
+A violation at or above `impact` is a fault of kind `a11y` (rule, impact, count, targets, help
+URL); a lower one is a warning. A disabled rule's findings are still recorded, marked
+`excusedBy: "a11y.disable"`, so turning a rule off never makes its evidence disappear. A scan is a
+measurement of that moment, not an event: its findings belong to that check, not to the session's
+retained faults. axe is shipped into the page as a function, so a strict CSP does not block it.
+The proof boundary: automated rules find a subset of accessibility problems; every report says
+a clean scan is not an audit.
+
 ### Completion evidence
 
 `--workflow` labels artifacts; it never runs a journey. A seeded screenshot or a zero-fault `check`
@@ -210,6 +233,33 @@ text from the DOM proves it exists, not that a person can reach it.
 Drive running → terminal transitions so a stale result cannot satisfy a wait. Use condition-based
 waits, never sleeps. After a fix, `reset` and replay the same fixture, then promote the assertions
 into the Playwright suite and run it — exploration is not coverage until it lands as a test.
+
+### Promote a batch into a test
+
+```sh
+web-harness promote batches/save.js --to tests/e2e/save.spec.ts --title "saves a note" \
+  --fixture saved --scenario save-note [--target dev|production]
+```
+
+writes a spec that imports the project's `test` and `expect` (`e2e.fixtures`, default
+`tests/e2e/fixtures.ts`), seeds with `applyHarnessFixture(page, harness, 'saved')` — the adapter's
+`prepare` in Node, the environment's clock, then `apply` through the page, as `start` does — and
+runs the batch function unchanged with `batchHelpers`: `step` is `test.step`, `assert` is
+`expect(…).toBeTruthy()`, `allowFault`/`expectFault` go through the test's fault guard, and
+`observe`, `state`, `effect` and `clock` behave as in a session. It prints the `covers` entry to add
+under the scenario rather than editing the config. `--target` is what the suite's `webServer`
+serves (default `production` when the project has a build): there `state` answers `unsupported`,
+so a batch that reads it should assert visible UI or `durable` instead.
+
+### For agents: the skill and `describe`
+
+The package ships `skills/web-harness/SKILL.md`: when to use the harness, the loop, what each
+command proves, the evidence rules and the proof boundaries — nothing project-specific.
+`web-harness skill install [--dir .claude/skills | .agents/skills]` copies it into the project
+(a copy, stamped with the version; `doctor` warns when the installed copy is from another version).
+A project keeps its own skills for app-specific journeys and points them at this one.
+`web-harness describe --json` is the machine-readable project: fixtures with descriptions, state
+sections, scenarios and their status, targets, ports, environment, smoke hooks and every command.
 
 ## One fault policy
 
@@ -265,12 +315,14 @@ one) must agree: evidence about two different builds fails. Scenario statuses: `
    long-cached, hashed assets that are `immutable` (`/assets/*` checks the first built file);
 2. **bundle** — a production build (no Vite client, no `/src/`);
 3. **globals** — no development accessor;
-4. **sw** — a service worker controls the page after one reload;
-5. **persist** — the project's `persist` action survives a reload;
-6. **offline** — the same survives an offline reload;
-7. **online** — back online, a reload still works and `reconnect` (if any) succeeds;
-8. **update** — see below;
-9. **faults** — nothing above faulted.
+4. **a11y** — with an `a11y` block (and `axe-core` installed; `smoke.a11y: false` skips it): no
+   violation at or above its impact on the first screen;
+5. **sw** — a service worker controls the page after one reload;
+6. **persist** — the project's `persist` action survives a reload;
+7. **offline** — the same survives an offline reload;
+8. **online** — back online, a reload still works and `reconnect` (if any) succeeds;
+9. **update** — see below;
+10. **faults** — nothing above faulted.
 
 It writes `.web-harness/smoke/report.json` with the build digest, and on failure `failure.png`,
 `network.jsonl` and `console.jsonl`.

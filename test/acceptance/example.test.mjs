@@ -28,7 +28,7 @@ before(async () => {
 });
 
 after(async () => {
-  for (const session of ["accept", "prod", "interrupt", "env"])
+  for (const session of ["accept", "prod", "interrupt", "env", "clock"])
     await example?.harness(["--session", session, "stop"]).catch(() => {});
   await example?.cleanup();
 });
@@ -45,6 +45,33 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     assert.match(report.imageId, /^sha256:/);
     assert.equal(typeof report.resources.ok, "boolean");
     assert.equal(report.evidenceIgnored, true, "the example ignores .web-harness/");
+  });
+
+  await t.test("describe prints what an agent needs, and doctor notices a stale skill", async () => {
+    const described = await harness(["describe", "--json"]);
+    assert.equal(described.code, 0, described.stderr);
+    const project = JSON.parse(described.stdout);
+    assert.deepEqual(project.fixtures.map((fixture) => fixture.name), ["saved", "imported", "blank"]);
+    assert.equal(project.fixtures[0].default, true);
+    assert.deepEqual(project.targets, ["dev", "production"]);
+    assert.equal(project.a11y.impact, "serious");
+    assert.equal(project.e2e.fixtures, "tests/e2e/fixtures.js");
+    assert.ok(project.commands.session.includes("describe"));
+    assert.ok(project.commands.tools.includes("promote"));
+    assert.deepEqual(project.smoke.hooks, ["ready", "persist", "verify", "update.prompt", "update.accept", "update.dismiss"]);
+    assert.equal(project.scenarios.find((scenario) => scenario.id === "installed-phone").status, "unsupported");
+
+    const installed = await harness(["skill", "install", "--dir", ".claude/skills"]);
+    assert.equal(installed.code, 0, installed.stderr);
+    const skillFile = path.join(root, ".claude/skills/web-harness/SKILL.md");
+    const skill = await readFile(skillFile, "utf8");
+    assert.match(skill, /^---\nname: web-harness\n/);
+    const fresh = await harness(["doctor"]);
+    assert.doesNotMatch(fresh.stderr, /SKILL\.md/);
+    await writeFile(skillFile, skill.replace(/<!-- web-harness \d+\.\d+\.\d+:/, "<!-- web-harness 0.0.1:"));
+    const stale = await harness(["doctor"]);
+    assert.match(stale.stderr, /warning: \.claude\/skills\/web-harness\/SKILL\.md is from web-harness 0\.0\.1/);
+    await rm(path.join(root, ".claude"), { recursive: true, force: true });
   });
 
   await t.test("start seeds the fixture through the UI and records zero faults", async () => {
@@ -271,6 +298,27 @@ test("controller: a session's whole lifecycle, and the refusals that keep it own
     }
   });
 
+  await t.test("check --a11y fails an icon button without a name, and a disabled rule keeps the record", async () => {
+    const clean = await session(["check", "--a11y"]);
+    assert.equal(clean.code, 0, clean.stderr + clean.stdout.slice(-2000));
+    const unlabel = await session(["cli", "eval", "() => document.getElementById('clear').removeAttribute('aria-label')"]);
+    assert.equal(unlabel.code, 0, unlabel.stderr);
+    const failed = await session(["check", "--a11y"]);
+    assert.equal(failed.code, 1);
+    assert.match(failed.stderr, /a11y: button-name \(critical\)/);
+    const { runDir } = await manifest();
+    const faults = JSON.parse(await readFile(path.join(runDir, "faults.json"), "utf8"));
+    assert.equal(faults.a11y.faults, 1);
+    assert.match(faults.a11y.boundary, /not an audit/);
+    const excused = await session(["check", "--a11y", "--a11y-disable", "button-name"]);
+    assert.equal(excused.code, 0, excused.stderr);
+    const kept = JSON.parse(await readFile(path.join(runDir, "faults.json"), "utf8"));
+    assert.equal(kept.records.find((record) => record.rule === "button-name")?.excusedBy, "a11y.disable");
+    // A scan is of the page as it is: a plain check afterwards does not carry it.
+    assert.equal((await session(["reload"])).code, 0);
+    assert.equal((await session(["check"])).code, 0);
+  });
+
   await t.test("stop removes exactly what the session owned", async () => {
     const { server, hostEnvironment } = await manifest();
     const result = await session(["stop"]);
@@ -376,7 +424,7 @@ test("smoke: passes the example build, and fails each broken variant in the righ
     const { code, report } = await smoke("dist", "ok");
     assert.equal(code, 0, JSON.stringify(report.checks));
     assert.equal(report.status, "passed");
-    assert.deepEqual(report.checks.map((check) => check.name), ["headers", "bundle", "globals", "sw", "persist", "offline", "online", "update", "faults"]);
+    assert.deepEqual(report.checks.map((check) => check.name), ["headers", "bundle", "globals", "a11y", "sw", "persist", "offline", "online", "update", "faults"]);
     const update = report.checks.find((check) => check.name === "update").detail;
     assert.deepEqual(update, { mode: "prompt", detected: true, consent: true, dismissed: "prompt returned after a reload", activated: true, navigations: 1 });
   });
@@ -452,6 +500,17 @@ test("smoke: passes the example build, and fails each broken variant in the righ
     assert.match(report.error, /Development globals in production: __harness/);
   });
 
+  await t.test("an icon button that lost its name fails a11y", async () => {
+    const dist = await variant("a11y", async (dir) => {
+      const index = path.join(dir, "index.html");
+      await writeFile(index, (await readFile(index, "utf8")).replace(' aria-label="Clear note"', ""));
+    });
+    const { code, report } = await smoke(dist, "a11y");
+    assert.equal(code, 1);
+    assert.equal(failedPhase(report), "a11y");
+    assert.match(report.error, /button-name \(critical\)/);
+  });
+
   await t.test("a missing service worker fails sw", async () => {
     const dist = await variant("sw", (dir) => rm(path.join(dir, "sw.js")));
     const { code, report } = await smoke(dist, "sw");
@@ -462,9 +521,20 @@ test("smoke: passes the example build, and fails each broken variant in the righ
 
 test("e2e: the suite runs in the pinned container and the scenario join verifies it", { timeout: 20 * 60_000 }, async () => {
   const { harness, readJson, root } = example;
+  // promote writes exactly the spec the example keeps: a batch became a test.
+  const promoted = await harness([
+    "promote", "batches/effects.js", "--to", "tests/e2e/promoted.spec.js", "--force",
+    "--title", "a save changes the note and a cancel changes nothing", "--fixture", "blank", "--scenario", "save-note",
+  ]);
+  assert.equal(promoted.code, 0, promoted.stderr);
+  assert.match(promoted.stdout, /covers: \[\{"file":"tests\/e2e\/promoted\.spec\.js"/);
+  assert.equal((await exec("git", ["diff", "--exit-code", "tests/e2e/promoted.spec.js"], { cwd: root })).code, 0);
   const run = await harness(["e2e"]);
   assert.equal(run.code, 0, run.stderr + run.stdout.slice(-4000));
   const results = await readJson("e2e-results.json");
+  const titles = JSON.stringify(results.suites);
+  for (const title of ["a save changes the note and a cancel changes nothing", "an icon button without a name is an a11y fault", "a disabled rule excuses the finding but keeps it"])
+    assert.ok(titles.includes(title), `ran: ${title}`);
   assert.ok(results.config.rootDir.startsWith(root), `not rehomed: ${results.config.rootDir}`);
   // The smoke test above left a passing report; given as the lane's report, it verifies the lane.
   const scenarios = await harness(["scenarios", "--results", "e2e-results.json", "--lane", "smoke=.web-harness/smoke-ok/report.json"]);

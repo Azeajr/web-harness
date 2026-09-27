@@ -51,6 +51,10 @@ $("save").addEventListener("click", async () => {
   $("status").textContent = "Saved";
 });
 
+$("clear").addEventListener("click", () => {
+  $("note").value = "";
+});
+
 $("import").addEventListener("change", async () => {
   const file = $("import").files[0];
   if (!file) return;

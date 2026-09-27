@@ -25,7 +25,21 @@ export const commands = [
   "run",
   "effect",
   "reconcile",
+  "describe",
 ];
+
+// One-shot tooling commands, each its own module (bin/web-harness.mjs dispatches them). Everything
+// else is the session controller.
+export const toolCommands = {
+  serve: "serve-cli.mjs",
+  smoke: "smoke.mjs",
+  e2e: "container.mjs",
+  mutate: "mutate.mjs",
+  scenarios: "scenarios.mjs",
+  digest: "digest-cli.mjs",
+  skill: "skill.mjs",
+  promote: "promote.mjs",
+};
 const baseValueOptions = [
   "session",
   "browser",
@@ -44,8 +58,10 @@ const baseValueOptions = [
   "now",
   "clock",
   "scenario",
+  "a11y-impact",
+  "a11y-disable",
 ];
-const flagOptions = new Set(["help", "full-page", "hires", "force-resources", "after-unknown"]);
+const flagOptions = new Set(["help", "full-page", "hires", "force-resources", "after-unknown", "json", "a11y"]);
 
 export const TRACE_MODES = ["off", "retain-on-failure", "keep"];
 
