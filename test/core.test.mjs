@@ -27,6 +27,7 @@ import {
   serverIdentity,
   slug,
   targetUrl,
+  toolArguments,
 } from "../src/core.mjs";
 
 const policy = faultPolicy();
@@ -431,4 +432,11 @@ test("a batch waits for its own in-flight requests without timer globals", async
   )({ ...page, __request: request });
   assert.equal(result.ok, true, result.error);
   assert.equal(waited, 1, "polled through the page until the request finished");
+});
+
+test("a separator right after a tool command is dropped, and only there", () => {
+  assert.deepEqual(toolArguments(["--", "--shard=2/6"]), ["--shard=2/6"]);
+  assert.deepEqual(toolArguments(["--shard=2/6"]), ["--shard=2/6"]);
+  assert.deepEqual(toolArguments(["--grep", "x", "--", "tests/a.spec.ts"]), ["--grep", "x", "--", "tests/a.spec.ts"]);
+  assert.deepEqual(toolArguments([]), []);
 });

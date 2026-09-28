@@ -42,6 +42,11 @@ export const toolCommands = {
   bench: "bench.mjs",
   "mutation-score": "mutation-score.mjs",
 };
+
+// `pnpm <script> -- --shard=2/6` hands the `--` through to the tool. Right after a tool command it
+// means nothing, and passed on it would tell Playwright or Stryker "what follows are file filters":
+// `e2e -- --shard=2/6` then ignored the shard and ran every test. Dropped here, once, for all tools.
+export const toolArguments = (args) => (args[0] === "--" ? args.slice(1) : args);
 const baseValueOptions = [
   "session",
   "browser",
