@@ -574,9 +574,13 @@ test("e2e: the suite runs in the pinned container and the scenario join verifies
   assert.match(report.source.commit, /^[0-9a-f]{40}$/);
   assert.match(report.results.digest, /^[0-9a-f]{64}$/);
   // The same suite in another timezone and locale.
-  const zoned = await harness(["e2e", "--timezone", "Pacific/Kiritimati", "--locale", "en-GB", "--grep", "timezone"]);
+  // Passed the way `pnpm <script> -- args` passes them: the separator must not turn --grep into a
+  // file filter (which would run the whole suite).
+  const zoned = await harness(["e2e", "--", "--timezone", "Pacific/Kiritimati", "--locale", "en-GB", "--grep", "timezone"]);
   assert.equal(zoned.code, 0, zoned.stderr + zoned.stdout.slice(-3000));
-  assert.equal((await readJson("e2e-results.json")).webHarness.timezone, "Pacific/Kiritimati");
+  const zonedResults = await readJson("e2e-results.json");
+  assert.equal(zonedResults.webHarness.timezone, "Pacific/Kiritimati");
+  assert.equal(zonedResults.stats.expected, 1, "only the timezone test ran");
 });
 
 test("playwright: a failing test carries the network and console evidence", { timeout: 10 * 60_000 }, async () => {
