@@ -9,6 +9,10 @@ consumers (chess-mcp, chorequest, tabletop-strategy-companion, training-log) sho
 adoption. Every "Today" line below was checked in the source at that commit; file:line references
 are to that commit. Anything not verified is marked **open question**.
 
+**Updated 2026-09-28** after v0.2.1 and moving all four consumers to v0.2.0: M0–M5 are shipped. What
+remains is three small gaps found during that move (O3, H5, A6), one optional item (A5), and the
+consumer follow-ups in Appendix A, ordered by value.
+
 **Scope.** Only work that belongs in this repository: the controller, the Playwright exports, the
 smoke, the container runner, the scenario inventory, the composite actions, the docs, and anything
 consumers would otherwise each re-implement. Consumer-only follow-ups are listed in Appendix A so
@@ -23,6 +27,9 @@ plus unit tests. L = a new subsystem that needs the Docker acceptance suite (G1)
 
 | ID | Item | Size | Milestone |
 |---|---|---|---|
+| [O3](#o3-the-smoke-finds-the-service-worker-itself) | The smoke finds the service worker itself | S | v0.2.2 |
+| [H5](#h5-a-stale-port-lease-says-how-to-clear-it) | A stale port lease says how to clear it | S | v0.2.2 |
+| [A6](#a6-skill-commands-for-npm-projects) | Skill commands for npm projects | S | v0.2.2 |
 | [A5](#a5-record-a-batch-from-cli-actions) | Record a batch from CLI actions (optional) | S | M4 follow-up |
 
 ## Milestones
@@ -45,6 +52,63 @@ every `uses:` reference together (README, "Released by tag").
 - **M5 — Extended tier and measurement** shipped: the reusable scheduled workflow with
   `mutation-score` (G2), and phase timings, peak memory and `bench` (H3). Proving G2 on a real
   schedule is consumer work (Appendix A).
+- **v0.1 → v0.2 follow-ups** shipped in v0.2.1: a `--` right after a tool command is dropped
+  (`pnpm <script> -- --shard=…` had made every chess shard run the whole suite).
+- **v0.2.2 — gaps found moving the consumers.** O3, H5, A6: each small, each hit for real.
+
+---
+
+## v0.2.2 — gaps found moving the consumers
+
+### O3. The smoke finds the service worker itself
+
+**Why.** The update phase publishes a second version by changing the worker script's bytes, so it
+must know which file that is. training-log's worker is `service-worker.js` (vite-plugin-pwa
+`injectManifest` with `filename`), and its first v0.2.0 smoke failed: "No sw.js in the build; set
+smoke.update.sw, or smoke.update: false." It needed a config line (training-log #189).
+
+**Today.** `src/smoke.mjs` defaults `smoke.update.sw` to `"sw.js"`.
+
+**Design.** By the update phase the page is controlled (the `sw` phase proved it), so read
+`navigator.serviceWorker.controller.scriptURL` and use its path when `smoke.update.sw` is not set.
+`sw` stays as an override. The update check's detail names the file it republished.
+
+**Acceptance.** A variant of `examples/minimal` whose worker is renamed passes the update phase with
+no `sw` setting. training-log can then drop its `update.sw` line.
+
+### H5. A stale port lease says how to clear it
+
+**Why.** A session killed hard (SIGKILL, a crash) leaves `/tmp/web-harness-<uid>-port-<N>.lock`.
+Every later start on that port is then refused with "Review port is reserved … Stop its recorded
+owner first", even when the recorded owner's directory is gone. This happened on 2026-09-27 after a
+force-killed acceptance run, and the file had to be found and removed by hand.
+
+**Today.** `acquirePortLease` (`src/core.mjs`) refuses any existing lease. The lease records the
+token, root, project, session and `manifestPath`, but no process.
+
+**Design.**
+- A lease is stale when its `manifestPath` does not exist and nothing listens on the port.
+- `doctor` names stale leases. `start` refuses with the exact command to remove one, or reclaims
+  it under `--reclaim-stale-lease`.
+- A lease whose manifest exists is never touched: a live or stopped-but-owned session still owns it.
+
+**Open question.** `start` writes the lease before the manifest. Record the starting process's
+identity in the lease and require it dead too, so a session that is mid-start never looks stale.
+
+**Acceptance.** After a SIGKILL-ed start whose session directory was removed, `doctor` names the
+lease and `start --reclaim-stale-lease` succeeds; with the manifest present, it still refuses.
+
+### A6. Skill commands for npm projects
+
+**Why.** The shipped skill tells an agent to run `pnpm exec web-harness describe --json` and
+`pnpm exec web-harness doctor`. tabletop is an npm project (`npx web-harness`,
+`npm run harness -- …`).
+
+**Design.** Name both forms once ("`pnpm exec web-harness` — or `npx web-harness` in an npm
+project") and use plain `web-harness …` elsewhere, as the rest of the skill already does. Consumers
+reinstall the skill with their next bump.
+
+**Acceptance.** The skill test still passes. tabletop's installed copy names `npx`.
 
 ---
 
@@ -69,31 +133,58 @@ under `web-harness e2e`.
 
 ## Appendix A — Consumer follow-ups (not web-harness work)
 
-Kept here so they are not lost. Each happens in the consumer's own repository, through a PR.
+Kept here so they are not lost. Each happens in the consumer's own repository, through a PR. In
+the order they pay off. Checked 2026-09-28 unless noted.
 
-- **Version bumps.** Done for v0.2.0 on 2026-09-28 in all four (training-log #189, tabletop #26,
-  chess-mcp #82, chorequest #11). v0.2.1 only drops a `--` right after a tool command
-  (`pnpm <script> -- --shard=…`); chess, the one consumer that passed one, dropped it in its CI
-  instead, so the others can take v0.2.1 with their next dependency update.
-- **chess-mcp E2E evidence.** Its Playwright config has no retries, trace, screenshot or video.
-  Adopting A1 fixes it; until then, add them directly.
-- **Skills.** Run `web-harness skill install` in training-log, tabletop and chorequest. chess-mcp
-  links its `ux-review` skill to the shared one.
-- **Accessibility.** Add `axe-core` and an `a11y` block to opt into `check --a11y`, `checkA11y` and
-  the smoke's `a11y` phase; start with `impact: 'critical'` and tighten.
-- **Promote.** Set `e2e.fixtures` where the fixtures module is not `tests/e2e/fixtures.ts`.
-- **Update-flow hooks.** Each consumer adds `smoke.update.prompt`/`accept` for its own prompt (O1).
-- **Extended tier.** training-log adopts `extended.yml` nightly with `mutation: true` and a
-  threshold (it needs Stryker's `json` reporter), and checks that a threshold above its score
-  opens the issue and the next green run closes it — the proof G2 still needs. chorequest (private,
-  2,000 free minutes) runs it weekly after measuring one run.
-- **Baselines.** Run `web-harness bench` in each consumer on the machines that matter and record
-  the numbers before setting any budget.
-- **Environment.** chorequest moves its clock pin from `apply` into `environment` (P1).
-  training-log should decide its timezone variants (sessions and cycles are date-driven).
-- **chorequest branch protection.** Unavailable: a private repository on the free plan. The
-  workflow's `deploy` `needs: [checks, smoke]` is the only gate. Nothing to do unless the plan
-  changes.
+1. **Use the shared Playwright settings (A1) — all four.** None of the four spreads
+   `harnessPlaywright(harness)` into its Playwright config. chess-mcp's config has no retries,
+   trace, screenshot or video, so a failing E2E test in CI leaves no evidence to read. The preset
+   adds the failing attempt's trace, a screenshot and video, `forbidOnly`, one retry in CI and
+   `failOnFlakyTests`. Keep project settings as overrides.
+2. **Finish the update check in the smoke (O1) — all four.** Each smoke's update phase reports
+   `activation: "not exercised"`: it proves a new version is detected and waits for consent, but
+   never accepts it. Add `smoke.update.prompt` (wait for the app's own update prompt) and `accept`
+   (click it), and `dismiss` where the app has one. The smoke then proves the new version
+   activates, keeps the data and reloads once.
+3. **chorequest: move the pinned clock into `environment` (P1).** Its fixture pins time with
+   `page.clock.setFixedTime` inside `apply` (`harness.config.mjs:19`), which a `restart` loses.
+   `environment: { clock: 'fixed', now }` is re-applied on every open and also reaches the
+   Playwright suite.
+4. **Accessibility (A4) — opt-in, all four.** Add `axe-core` and an `a11y` block to turn on
+   `check --a11y`, the `checkA11y` fixture and the smoke's `a11y` phase. Start with
+   `impact: 'critical'` and tighten; expect real findings on the first run.
+5. **Extended tier (G2) — training-log first.** Adopt `extended.yml` nightly with `mutation: true`
+   and a threshold (Stryker needs its `json` reporter). Check that a threshold above the current
+   score opens the issue and the next green run closes it; that is the proof G2 still needs.
+   chorequest (private, 2,000 free minutes a month) runs it weekly, after measuring one run.
+6. **Timezone variants — training-log.** Sessions and cycles are date-driven: decide which zones and
+   DST dates to run (`extended.yml` `timezones`, or `e2e --timezone`), e.g. America/New_York across
+   2026-03-08 and 2026-11-01, and Pacific/Kiritimati.
+7. **chess-mcp: a flaky focus test.** `apps/ui/test/e2e/strategic-fit-stage-layout.spec.ts:97`
+   (WP-033 AC-4, chromium) failed `toBeFocused` once in CI on #82. It passed 20 of 20 locally and in
+   the other five CI runs. Watch it; #1 above keeps the evidence next time.
+8. **Version bumps.** All four moved to v0.2.0 on 2026-09-28 (training-log #189, tabletop #26,
+   chess-mcp #82, chorequest #11). v0.2.1 only drops a `--` after a tool command, which chess
+   already fixed in its CI (#83), so take it, or v0.2.2, with the next dependency update. With
+   every bump:
+   - reinstall the agent skill (`doctor` warns when it is stale);
+   - with pnpm 11, check that the lockfile entry for `@azeajr/web-harness` still has an
+     `integrity`. pnpm 11 omits it when the tarball is already in the local store; resolve with
+     `pnpm install --lockfile-only --store-dir <empty dir>` (11.3 also needs `node_modules` moved
+     aside).
+9. **Baselines.** Run `web-harness bench` in each consumer on the machines that matter and record
+   the numbers before setting any budget.
+10. **Promote.** Set `e2e.fixtures` where the fixtures module is not `tests/e2e/fixtures.ts`.
+11. **Repository setting — all five, including this one (decision pending).** GitHub's
+    "Automatically delete head branches" removes a PR's branch when it merges. Until now merged
+    branches were deleted by hand. It changes nothing else.
+12. **chorequest branch protection.** Unavailable: a private repository on the free plan. The
+    workflow's `deploy` `needs: [checks, smoke]` is the only gate. Nothing to do unless the plan
+    changes.
+
+Done, for the record: the agent skill is installed in all four (training-log #190, tabletop #27,
+chess-mcp #84, chorequest #12). chess keeps it in `.agents/skills/`, because its `.claude/skills/`
+holds the plugin's product skills.
 
 ## Appendix B — Out of scope
 
@@ -111,7 +202,8 @@ The design review names these, and they stay out of web-harness on purpose:
 
 ## Appendix C — Already built (do not rebuild)
 
-For orientation, and so that nobody re-implements these:
+For orientation, and so that nobody re-implements these. The table is v0.1.4 (line numbers are from
+`ee70460`); everything M0–M5 added is described in `docs/HARNESS.md`.
 
 | Capability | Where |
 |---|---|
