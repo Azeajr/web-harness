@@ -395,10 +395,10 @@ saves. Use these measurements to check whether the default memory bounds suit th
 - **Memory budget.** `start`/`preflight` and `e2e` read `/proc/meminfo` and refuse to start a
   container the host cannot hold: its bound (plus the host server's heap for a session) plus a
   margin must fit in `MemAvailable`, less what running harness containers may still grow into up to
-  their own bounds. A session defaults to a 1.5 GiB browser container and a 512 MiB host server
+  their own bounds. A session defaults to a 1.5 GiB browser container and a 256 MiB host server
   V8 heap; the latter does not bound the server's child processes. The margin is 1.5 GiB, or 2 GiB
   without swap (`WEB_HARNESS_MEMORY_MARGIN` overrides it). The default session check therefore
-  needs 4 GiB usable on a no-swap host. `e2e` sizes its container to what is free, between 3 and
+  needs 3.75 GiB usable on a no-swap host. `e2e` sizes its container to what is free, between 3 and
   6 GiB, unless `WEB_HARNESS_E2E_MEMORY` sets it. `smoke` runs a host browser outside this budget.
   On refusal, stop a listed harness run or another heavy workload and retry once; do not poll for
   memory to become available. `--force-resources` proceeds anyway and is recorded. Run one heavy

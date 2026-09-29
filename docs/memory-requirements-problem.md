@@ -85,14 +85,17 @@ waiting for memory that never frees up.
 ## Follow-up in this checkout
 
 Two short `chess-mcp` sessions on 2026-09-29 peaked below 0.8 GiB in the browser
-container and about 0.11 GiB in the server process tree. The session defaults
-are now a 1.5 GiB browser bound, a 512 MiB server heap and a 2 GiB no-swap
-margin, lowering the admission requirement from 6.5 to 4 GiB. An omitted
-timezone or locale no longer fails startup, and a memory refusal happens
-before the temporary browser probe with a concrete next step. A short live
-session with the new defaults passed with zero faults. These measurements do
-not establish a safe bound for every workflow, especially container `e2e` and
-native `smoke`.
+container and about 0.11 GiB in the server process tree. A later depth-20 audit
+of 20 positions peaked at about 1.18 GiB in a browser container capped at
+1.25 GiB. It completed with zero faults, but that cap left little room for
+heavier journeys. A 256 MiB server heap passed a development journey; the
+production server served a separately built app and accepted a board move. The
+session defaults are now a 1.5 GiB browser bound, a 256 MiB server heap, and a
+2 GiB no-swap margin, lowering the admission requirement from 6.5 to 3.75 GiB. An
+omitted timezone or locale no longer fails startup, and a memory refusal
+happens before the temporary browser probe with a concrete next step. These
+measurements do not establish a safe bound for every workflow, especially
+container `e2e` and native `smoke`.
 
 ## Open questions for whoever fixes it
 

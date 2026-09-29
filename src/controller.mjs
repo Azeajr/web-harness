@@ -91,12 +91,14 @@ const serverEntry = await realpath(path.join(here, "server.mjs"));
 // runs in. The session's server runs on the host, outside that bound, so cap its heap instead.
 // This stays an argv entry: the PID, start time, cwd and entry that ownsProcess matches on are
 // unchanged. It bounds the V8 heap only; esbuild and other children are not covered.
-// Two chess-mcp session starts peaked below 0.8 GiB in the browser container and 0.12 GiB in
-// the server tree. Keep room for heavier journeys while making a normal 12 GiB host usable.
+// A chess-mcp depth-20 engine audit peaked around 1.18 GiB in the browser container. Keep room
+// above that workload's peak while making a normal 12 GiB host usable.
 const containerMemory = process.env.WEB_HARNESS_DOCKER_MEMORY ?? "1536m";
 const containerCpus =
   process.env.WEB_HARNESS_DOCKER_CPUS ?? String(Math.min(2, availableParallelism()));
-const serverHeapMb = process.env.WEB_HARNESS_SERVER_HEAP_MB ?? "512";
+// The same session's server tree peaked around 0.11 GiB; a production server with this heap
+// served the built app and accepted a board move. The build runs in a separate process.
+const serverHeapMb = process.env.WEB_HARNESS_SERVER_HEAP_MB ?? "256";
 // How long one Playwright CLI call may take before its outcome is unknown (see reconcile).
 const cliTimeout = Number(process.env.WEB_HARNESS_CLI_TIMEOUT_MS ?? 180_000);
 if (!/^[1-9]\d{1,4}$/.test(serverHeapMb))
