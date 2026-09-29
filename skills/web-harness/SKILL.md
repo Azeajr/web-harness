@@ -75,7 +75,8 @@ What each proves:
 
 - One heavy job at a time: a session, `e2e` or `smoke` each run a browser. Check `free -h`
   before starting one. The memory budget refuses a start the host cannot hold; do not reach for
-  `--force-resources` to get around it.
+  `--force-resources` to get around it. If refused, stop a listed harness run or another heavy
+  workload and retry once. Do not poll for memory or repeatedly rerun `doctor`.
 - Use distinct `--session` names and `--port`s for concurrent sessions, and `stop` each one.
 - Never run a project's browser suite outside `web-harness e2e` while a session is up.
 

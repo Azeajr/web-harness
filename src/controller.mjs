@@ -91,10 +91,12 @@ const serverEntry = await realpath(path.join(here, "server.mjs"));
 // runs in. The session's server runs on the host, outside that bound, so cap its heap instead.
 // This stays an argv entry: the PID, start time, cwd and entry that ownsProcess matches on are
 // unchanged. It bounds the V8 heap only; esbuild and other children are not covered.
-const containerMemory = process.env.WEB_HARNESS_DOCKER_MEMORY ?? "3g";
+// Two chess-mcp session starts peaked below 0.8 GiB in the browser container and 0.12 GiB in
+// the server tree. Keep room for heavier journeys while making a normal 12 GiB host usable.
+const containerMemory = process.env.WEB_HARNESS_DOCKER_MEMORY ?? "1536m";
 const containerCpus =
   process.env.WEB_HARNESS_DOCKER_CPUS ?? String(Math.min(2, availableParallelism()));
-const serverHeapMb = process.env.WEB_HARNESS_SERVER_HEAP_MB ?? "1024";
+const serverHeapMb = process.env.WEB_HARNESS_SERVER_HEAP_MB ?? "512";
 // How long one Playwright CLI call may take before its outcome is unknown (see reconcile).
 const cliTimeout = Number(process.env.WEB_HARNESS_CLI_TIMEOUT_MS ?? 180_000);
 if (!/^[1-9]\d{1,4}$/.test(serverHeapMb))
@@ -820,6 +822,20 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
         `Matching Playwright image is unavailable. Provision it with: docker pull ${image}`,
       );
     }
+    if (checkPort) {
+      if (options.url) {
+        await probeUrl(reviewUrl(options, config.port), "dev");
+        await serverIdentity(reviewUrl(options, config.port), root);
+      } else await availablePort(reviewUrl(options, config.port));
+    }
+    // Refuse before launching even the temporary browser probe on a memory-constrained host.
+    const resources = await checkBudget({
+      docker,
+      need: parseSize(containerMemory) + Number(serverHeapMb) * 1024 ** 2,
+      label: "Session",
+      force: options["force-resources"],
+    });
+    if (resources.forced) console.error(describeBudget(resources, "Session (forced)"));
     const probeName = `wh-probe-${randomUUID()}`;
     try {
       await docker([
@@ -857,20 +873,6 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       const ids = await docker(["ps", "-aq", "--filter", `name=^/${probeName}$`]);
       if (ids) await docker(["rm", "--force", ids]);
     }
-    if (checkPort) {
-      if (options.url) {
-        await probeUrl(reviewUrl(options, config.port), "dev");
-        await serverIdentity(reviewUrl(options, config.port), root);
-      } else await availablePort(reviewUrl(options, config.port));
-    }
-    // The session's container bound plus the host server's heap: what this session may grow to.
-    const resources = await checkBudget({
-      docker,
-      need: parseSize(containerMemory) + Number(serverHeapMb) * 1024 ** 2,
-      label: "Session",
-      force: options["force-resources"],
-    });
-    if (resources.forced) console.error(describeBudget(resources, "Session (forced)"));
     const drift = await versionDrift(root);
     for (const warning of describeDrift(drift)) console.error(`warning: ${warning}`);
     const skills = await installedSkills(root);

@@ -385,7 +385,7 @@ reads as separate commands, the same three in one batch, `reload`, `restart`, `r
 and prints the median and p90 of each step with the conditions (host cores and memory, image,
 Playwright, browser and device, target), writing everything, peaks included, to
 `.web-harness/bench/`. Compare "3 separate states" with "batch of 3 states" to see what batching
-saves. No budgets are set until baselines exist; derive them from these numbers.
+saves. Use these measurements to check whether the default memory bounds suit the project.
 
 ## Limits
 
@@ -395,11 +395,14 @@ saves. No budgets are set until baselines exist; derive them from these numbers.
 - **Memory budget.** `start`/`preflight` and `e2e` read `/proc/meminfo` and refuse to start a
   container the host cannot hold: its bound (plus the host server's heap for a session) plus a
   margin must fit in `MemAvailable`, less what running harness containers may still grow into up to
-  their own bounds. The margin is 1.5 GiB, or 2.5 GiB without swap, where memory pressure freezes
-  the host instead of killing one process (`WEB_HARNESS_MEMORY_MARGIN` overrides it). `e2e` sizes
-  its container to what is free, between 3 and 6 GiB, unless `WEB_HARNESS_E2E_MEMORY` sets it.
-  `--force-resources` proceeds anyway and is recorded. Run one heavy job at a time regardless: the
-  budget sees harness containers, not a browser suite started outside the harness.
+  their own bounds. A session defaults to a 1.5 GiB browser container and a 512 MiB host server
+  V8 heap; the latter does not bound the server's child processes. The margin is 1.5 GiB, or 2 GiB
+  without swap (`WEB_HARNESS_MEMORY_MARGIN` overrides it). The default session check therefore
+  needs 4 GiB usable on a no-swap host. `e2e` sizes its container to what is free, between 3 and
+  6 GiB, unless `WEB_HARNESS_E2E_MEMORY` sets it. `smoke` runs a host browser outside this budget.
+  On refusal, stop a listed harness run or another heavy workload and retry once; do not poll for
+  memory to become available. `--force-resources` proceeds anyway and is recorded. Run one heavy
+  job at a time: the budget sees harness containers, not a browser suite started outside the harness.
 - Emulated WebKit is not iOS Safari; installed-PWA behaviour, locked-phone timers and OS
   notification delivery need a real device — list them as `unsupported` scenarios.
 - The static server does not run Pages Functions or `_redirects` (it refuses a build that has one).

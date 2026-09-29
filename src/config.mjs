@@ -159,20 +159,23 @@ export const CLOCK_MODES = ["real", "fixed", "install"];
 // The environment a session's browser (and a suite, through harnessPlaywright) runs in. Command
 // options (--timezone, --locale, --now, --clock) override it per session.
 export function environmentConfig(raw = {}, overrides = {}) {
-  const merged = { clock: "real", ...raw, ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)) };
+  // A normalized config uses null for unset timezone/locale/now. Treat those as absent when it
+  // is passed back through here by the session controller; an unset CLI option must not erase a
+  // configured value or become the literal timezone/locale "null".
+  const merged = { clock: "real", ...raw, ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value != null)) };
   if (!CLOCK_MODES.includes(merged.clock)) throw new Error(`environment.clock must be ${CLOCK_MODES.join(", ")}.`);
   if (merged.clock !== "real") {
     if (!merged.now || Number.isNaN(Date.parse(merged.now)))
       throw new Error(`environment.clock "${merged.clock}" needs environment.now as an ISO date.`);
   }
-  if (merged.timezoneId !== undefined) {
+  if (merged.timezoneId != null) {
     try {
       new Intl.DateTimeFormat("en-US", { timeZone: merged.timezoneId });
     } catch {
       throw new Error(`Unknown timezone ${merged.timezoneId}.`);
     }
   }
-  if (merged.locale !== undefined) {
+  if (merged.locale != null) {
     try {
       new Intl.Locale(merged.locale);
     } catch {
