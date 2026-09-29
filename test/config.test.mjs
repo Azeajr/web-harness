@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { findRoot, functionSource, loadConfig, validateConfig } from "../src/config.mjs";
+import { environmentConfig, findRoot, functionSource, loadConfig, validateConfig } from "../src/config.mjs";
 import { decide } from "../.github/actions/verdict/verdict.mjs";
 import { flattenResults, titleMatcher, validateScenarios } from "../src/scenarios.mjs";
 
@@ -54,6 +54,15 @@ test("config validation fills defaults and rejects what cannot work", () => {
     /registered sections/,
   );
   assert.throws(() => validateConfig({ ...minimal, port: 80 }, "/repo"), /port/);
+});
+
+test("an unset session environment preserves configured timezone and locale", () => {
+  const defaults = environmentConfig();
+  assert.deepEqual(environmentConfig(defaults, { timezoneId: null, locale: null, now: null }), defaults);
+  const configured = environmentConfig({ timezoneId: "America/New_York", locale: "en-US" });
+  assert.deepEqual(environmentConfig(configured, { timezoneId: null, locale: null }), configured);
+  assert.equal(environmentConfig(configured, { timezoneId: "UTC" }).timezoneId, "UTC");
+  assert.throws(() => environmentConfig(configured, { timezoneId: "not-a-zone" }), /Unknown timezone/);
 });
 
 test("the project root is the nearest harness.config.mjs; the package manager follows the lockfile", async () => {

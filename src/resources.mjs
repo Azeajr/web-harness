@@ -1,9 +1,8 @@
 import { readFile } from "node:fs/promises";
 
-// Headroom before a heavy run. A host with no swap does not OOM-kill one process under memory
-// pressure: it stalls until it is rebooted. On 2026-09-27 a container E2E run and a native
-// multi-worker run started side by side did exactly that to a 12 GB machine. Every command that
-// starts a bounded container (a session's browser, a container E2E run) checks here first.
+// Headroom before a heavy run. A no-swap host stalled under memory pressure on 2026-09-27 when
+// container E2E and a native multi-worker run started side by side. Every command that starts a
+// bounded container (a session's browser, a container E2E run) checks here first.
 
 const GIB = 1024 ** 3;
 const UNITS = { b: 1, k: 1024, m: 1024 ** 2, g: GIB };
@@ -32,10 +31,10 @@ export function parseMeminfo(text) {
   };
 }
 
-// Without swap, pressure freezes the host instead of killing one process: keep more back.
+// Without swap, severe pressure can stall the host: keep more back.
 export function marginFor(memory, env = process.env) {
   if (env.WEB_HARNESS_MEMORY_MARGIN) return parseSize(env.WEB_HARNESS_MEMORY_MARGIN);
-  return memory.swapTotal > 0 ? 1.5 * GIB : 2.5 * GIB;
+  return memory.swapTotal > 0 ? 1.5 * GIB : 2 * GIB;
 }
 
 // Pure decision, exported for tests. A running harness container is already charged for what it
@@ -71,7 +70,7 @@ export function describeBudget(budget, label) {
         (container.session ? ` — stop with: web-harness stop --session ${container.session}` : ""),
     );
   if (!budget.swap)
-    lines.push("  No swap: memory pressure freezes this host instead of killing one process.");
+    lines.push("  No swap: severe memory pressure can stall this host.");
   return lines.join("\n");
 }
 
@@ -127,10 +126,15 @@ export async function checkBudget({ docker, need, label, force = false, env = pr
     margin: marginFor(memory, env),
   });
   budget.forced = Boolean(force && !budget.ok);
-  if (!budget.ok && !force)
+  if (!budget.ok && !force) {
+    const shortfall = formatSize(need + budget.margin - budget.usable);
+    const action = budget.containers.length
+      ? "Stop a listed harness session or E2E run, then retry once."
+      : "Free host memory by stopping another heavy workload, then retry once.";
     throw new Error(
-      `${describeBudget(budget, label)}\nNot enough memory headroom. Stop a running session or ` +
-        `E2E run first, or pass --force-resources to proceed anyway.`,
+      `${describeBudget(budget, label)}\nShort by ${shortfall}. ${action} ` +
+        "Do not poll for memory to become available.",
     );
+  }
   return budget;
 }

@@ -34,7 +34,7 @@ test("sizes and meminfo parse the way docker and the kernel write them", () => {
 });
 
 test("no swap keeps a larger margin, and the environment can set it", () => {
-  assert.equal(marginFor(parseMeminfo(meminfo(9, 0)), {}), 2.5 * GIB);
+  assert.equal(marginFor(parseMeminfo(meminfo(9, 0)), {}), 2 * GIB);
   assert.equal(marginFor(parseMeminfo(meminfo(9, 4)), {}), 1.5 * GIB);
   assert.equal(marginFor(parseMeminfo(meminfo(9, 0)), { WEB_HARNESS_MEMORY_MARGIN: "1g" }), GIB);
 });
@@ -91,7 +91,7 @@ test("checkBudget refuses with the reason and proceeds only when forced", async 
   const need = 10_000 * GIB;
   await assert.rejects(
     checkBudget({ docker, need, label: "Session" }),
-    /Not enough memory headroom[\s\S]*--force-resources/,
+    /Short by [\d.]+ GiB\. Free host memory[\s\S]*Do not poll/,
   );
   const forced = await checkBudget({ docker, need, label: "Session", force: true });
   assert.equal(forced.ok, false);
