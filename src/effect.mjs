@@ -9,14 +9,33 @@
 export const DIFF_LIMIT = 50;
 export const VALUE_LIMIT = 200;
 
-// SERIALIZED. The stable parts of an observe() result. Focus, scroll offsets and boxes move for
-// reasons of their own (a click focuses its button) and would make every "expect none" fail.
+// SERIALIZED. The parts of an observe() result a person sees: the match count and, per element,
+// text, visibility, attributes, css, and whether it is on screen. A control whose whole effect is to
+// scroll something into view (or away) changes only the last, so without it a reveal read as "no
+// watched change" and an unexpected move passed `expect: "none"`.
+// - inViewport, outsideViewport and clippedBy (the clipping or scrolling ancestors that cut it off,
+//   per axis) flip only when an edge crosses the viewport or a pane. Layout is deterministic, so an
+//   element that did not move does not flip them.
+// - Its own scroll offsets, rounded to whole CSS pixels: scrolling a pane changes what it shows; a
+//   fractional offset on a high-DPR screen does not.
+// Left out on purpose: focus (a click focuses its button), the box, and scroll and client sizes.
+// Coordinates shift by sub-pixels and with unrelated layout (a banner above, a web font, a scrollbar
+// a modal hides) while the element stays on screen, which would make "expect none" flaky; rounding
+// does not cure that (a 15 px scrollbar is not a rounding error, and a value near .5 still flips).
 export function stableObservation(observation) {
   return {
     count: observation.count,
     elements: observation.elements.map((element) => ({
       text: element.text,
       visible: element.visible,
+      inViewport: element.inViewport,
+      outsideViewport: element.outsideViewport,
+      // One value, e.g. "div:y main#workspace:xy" ("" when nothing clips it), so a reveal diffs as
+      // one line rather than a path per ancestor field.
+      clippedBy: element.clippedBy
+        .map((clip) => `${clip.tag}${clip.id ? `#${clip.id}` : ""}:${clip.x ? "x" : ""}${clip.y ? "y" : ""}`)
+        .join(" "),
+      scroll: { left: Math.round(element.scroll.left), top: Math.round(element.scroll.top) },
       attributes: element.attributes,
       css: element.css,
     })),
@@ -44,7 +63,8 @@ export async function readWatched(page, watch, lib) {
   return snapshot;
 }
 
-// SERIALIZED. Flatten to path → JSON text (depth-bounded) and compare.
+// SERIALIZED. Flatten to path → JSON text (depth-bounded) and compare. `compared` counts the values
+// compared per watched source (url, observe SEL, state, durable).
 export function diffValues(before, after, limits) {
   const flatten = (value, prefix, out, depth) => {
     if (value && typeof value === "object" && depth < 8) {
@@ -63,11 +83,18 @@ export function diffValues(before, after, limits) {
     if (a[path] === b[path]) unchanged.push(path);
     else changed.push({ path, before: cut(a[path]), after: cut(b[path]) });
   }
+  // Per source, flattened on its own: a selector may itself contain dots.
+  const isRecord = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  const leaves = (values, source) => (isRecord(values) && source in values ? flatten(values[source], source, {}, 1) : {});
+  const compared = {};
+  for (const source of new Set([before, after].flatMap((values) => (isRecord(values) ? Object.keys(values) : []))))
+    compared[source] = Object.keys({ ...leaves(before, source), ...leaves(after, source) }).length;
   return {
     changed: changed.slice(0, limits.entries),
     changedCount: changed.length,
     unchangedCount: unchanged.length,
     truncated: changed.length > limits.entries,
+    compared,
   };
 }
 
@@ -148,8 +175,18 @@ export async function settle(page, mark, timeoutMs, until) {
 // Returns a failure message or null.
 export function checkExpectation(name, expect, diff, before, after) {
   if (expect === undefined || expect === null) return null;
-  if (expect === "change")
-    return diff.changedCount ? null : `${name}: no watched change (${diff.unchangedCount} values compared).`;
+  if (expect === "change") {
+    if (diff.changedCount) return null;
+    // Say what was watched, so "no watched change" is not mistaken for "nothing changed".
+    const count = diff.unchangedCount;
+    const sources = Object.entries(diff.compared ?? {}).map(([source, n]) => `${source} ×${n}`);
+    const observed = Object.keys(diff.compared ?? {}).some((source) => source.startsWith("observe "))
+      ? " An observed element is compared by text, visible, inViewport, outsideViewport, clippedBy," +
+        " scroll offsets, attributes and css, not by position, size or focus."
+      : "";
+    const listed = sources.length ? `: ${sources.join(", ")}` : "";
+    return `${name}: no watched change (${count} value${count === 1 ? "" : "s"} compared${listed}).${observed}`;
+  }
   if (expect === "none")
     return diff.changedCount
       ? `${name}: expected no change, but ${diff.changed.map((item) => item.path).slice(0, 5).join(", ")} changed.`

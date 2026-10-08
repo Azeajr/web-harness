@@ -146,7 +146,7 @@ web-harness describe --json              # fixtures, state, scenarios, targets, 
 
 ```js
 await effect('save', () => page.getByRole('button', { name: 'Save' }).click(), {
-  observe: ['#saved'],          // bounded observe() of each, reduced to text, visibility, attributes
+  observe: ['#saved'],          // bounded observe() of each, reduced to what a person sees (below)
   state: ['document'],          // dev accessor sections (unsupported on production, and said so)
   durable: true,                // the adapter's durable.read, on any target
   settle: (page) => …,          // optional completion condition; default below
@@ -163,6 +163,17 @@ started by the action to finish, then for 150 ms without DOM mutations (timed fr
 paused page clock cannot stall it), at most 5 s, and reports `settled: false` rather than failing when it runs out. Storage writes are
 invisible to the network check; pass `settle` (or `--until SELECTOR` on the command) when a
 completion signal exists.
+
+An observed selector is compared by its match count and, per element, its text, `visible`,
+attributes and css, whether it is on screen (`inViewport`, `outsideViewport`, `clippedBy`), and its
+own scroll offsets rounded to whole pixels. A control that scrolls an element into view, or away,
+is therefore a change, and so is any scroll that carries a watched element across the viewport or a
+pane edge, including Playwright scrolling a click target into view. Focus and the exact box are not
+compared: a click moves focus, and coordinates shift by sub-pixels or with unrelated layout while
+the element stays on screen. The default settle does not wait for a smooth scroll to finish; in a
+batch, give `settle` a condition that does. The diff's `compared` counts the values compared per
+source, and a failed `expect: 'change'` lists them, so "no watched change" is not mistaken for
+"nothing changed".
 
 The command form wraps one Playwright CLI action for agents working command by command:
 `web-harness effect --observe '#saved' --durable --expect change -- click e12`.
