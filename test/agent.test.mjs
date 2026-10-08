@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,6 +13,8 @@ import { batchHelpers } from "../src/playwright.mjs";
 import { promotedSpec } from "../src/promote.mjs";
 import {
   describeSkillDrift,
+  describeSkillReach,
+  installTargets,
   installedSkills,
   mentionedCommands,
   readSkill,
@@ -51,6 +53,51 @@ test("an installed skill keeps its frontmatter first and is stamped with its ver
     const installed = await readFile(path.join(root, ".agents/skills/web-harness/SKILL.md"), "utf8");
     assert.equal(stampedVersion(installed), ownVersion);
     await assert.rejects(main(["install", "--dir", "../elsewhere"], { root }), /inside the project/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a bare skill install reaches Claude Code always and .agents/skills when the project has it", async () => {
+  const { main } = await import("../src/skill.mjs");
+  const root = await mkdtemp(path.join(os.tmpdir(), "wh-skill-"));
+  const current = async () => (await installedSkills(root)).map(({ file, ok }) => `${file} ${ok}`);
+  try {
+    assert.deepEqual(await installTargets(root), [".claude/skills"]);
+    await mkdir(path.join(root, ".agents"));
+    assert.deepEqual(await installTargets(root), [".claude/skills", ".agents/skills"]);
+
+    // Installed only for Codex, in a project that also uses Claude Code: doctor says so.
+    await mkdir(path.join(root, ".claude"));
+    await main(["install", "--dir", ".agents/skills"], { root });
+    assert.deepEqual(await current(), [".agents/skills/web-harness/SKILL.md true"]);
+    assert.match((await describeSkillReach(root, await installedSkills(root)))[0], /Claude Code loads project skills from \.claude\/skills alone/);
+
+    // One bare install afterwards reaches both and refreshes the stale copy.
+    await writeFile(path.join(root, ".agents/skills/web-harness/SKILL.md"), stampSkill(await readSkill(), "0.0.1"));
+    assert.match(describeSkillDrift(await installedSkills(root))[0], /Run `web-harness skill install`\.$/);
+    await main(["install"], { root });
+    assert.deepEqual(await current(), [".claude/skills/web-harness/SKILL.md true", ".agents/skills/web-harness/SKILL.md true"]);
+    assert.deepEqual(await describeSkillReach(root, await installedSkills(root)), []);
+
+    // --dir is exact and repeatable.
+    await rm(path.join(root, ".claude/skills"), { recursive: true });
+    await rm(path.join(root, ".agents/skills"), { recursive: true });
+    await main(["install", "--dir", ".claude/skills", "--dir", "./.claude/skills"], { root });
+    assert.deepEqual(await current(), [".claude/skills/web-harness/SKILL.md true"]);
+
+    // A hand-made link from .claude/skills to the .agents copy is written through, not replaced.
+    await rm(path.join(root, ".claude/skills"), { recursive: true });
+    await mkdir(path.join(root, ".agents/skills/web-harness"), { recursive: true });
+    await mkdir(path.join(root, ".claude/skills"));
+    await symlink("../../.agents/skills/web-harness", path.join(root, ".claude/skills/web-harness"));
+    await main(["install"], { root });
+    assert.ok((await lstat(path.join(root, ".claude/skills/web-harness"))).isSymbolicLink());
+    assert.deepEqual(await current(), [".claude/skills/web-harness/SKILL.md true", ".agents/skills/web-harness/SKILL.md true"]);
+
+    // A Codex-only project is not told to install for Claude Code.
+    await rm(path.join(root, ".claude"), { recursive: true });
+    assert.deepEqual(await describeSkillReach(root, await installedSkills(root)), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

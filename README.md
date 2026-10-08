@@ -60,7 +60,7 @@ export const test = createHarnessTest(base, harness)
 web-harness preflight | start | run FILE | observe SEL | state | effect … -- CLI | reload
             restart | reset | reconcile | screenshot LABEL | check [--a11y] | status | stop
             cli ... | describe --json                                (agent sessions)
-web-harness skill install [--dir .claude/skills|.agents/skills]      (agent skill)
+web-harness skill install [--dir .claude/skills|.agents/skills]...   (agent skill)
 web-harness promote BATCH --to SPEC --title T [--fixture F] [--scenario ID]
                                                                      (batch → Playwright test)
 web-harness serve --dir dist --port N [--unserved /api/]             (Pages-style server)

@@ -82,7 +82,7 @@ import { sourceIdentity } from "./provenance.mjs";
 import { STATUS, outcome } from "./status.mjs";
 import { checkBudget, describeBudget, formatSize, parseSize } from "./resources.mjs";
 import { describeDrift, ownVersion, versionDrift } from "./versions.mjs";
-import { describeSkillDrift, installedSkills } from "./skill.mjs";
+import { describeSkillDrift, describeSkillReach, installedSkills } from "./skill.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverEntry = await realpath(path.join(here, "server.mjs"));
@@ -183,7 +183,7 @@ Usage: web-harness [--session NAME] <command> [options]
                   current state beside it and allow runs again (or pass run --after-unknown)
   describe [--json]  This project as an agent needs it: fixtures, state, scenarios, targets, commands
 Tools: serve, smoke, e2e, scenarios, mutate, mutation-score, digest, bench [--repeat N],
-  promote BATCH --to SPEC --title T, skill install [--dir .claude/skills|.agents/skills]
+  promote BATCH --to SPEC --title T, skill install [--dir .claude/skills|.agents/skills]...
 
 Start/preflight: --target dev|production (default dev) --fixture NAME
   --browser ${config.defaults.browser} --device "${config.defaults.device}"
@@ -878,7 +878,8 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
     const drift = await versionDrift(root);
     for (const warning of describeDrift(drift)) console.error(`warning: ${warning}`);
     const skills = await installedSkills(root);
-    for (const warning of describeSkillDrift(skills)) console.error(`warning: ${warning}`);
+    for (const warning of [...describeSkillDrift(skills), ...(await describeSkillReach(root, skills))])
+      console.error(`warning: ${warning}`);
     // Evidence can hold private data (traces carry bodies); it must never be committed.
     const evidenceDirectory = path.relative(root, await resolvePath(root, options.output ?? ".web-harness", { outside: Boolean(options.output) }));
     const evidenceIgnored =
