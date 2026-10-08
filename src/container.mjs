@@ -7,8 +7,19 @@ import { directoryDigest, imageFor, run } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
 import { checkBudget, describeBudget, parseSize } from "./resources.mjs";
 
-// web-harness e2e [--update-snapshots] [--prebuilt DIR] [--force-resources] [playwright args...]
-//
+export const usage = `Usage: web-harness e2e [--update-snapshots] [--prebuilt DIR] [--force-resources]
+                       [--timezone IANA] [--locale TAG] [playwright args...]
+Run the project's Playwright suite in the pinned Playwright image (Docker), on a throwaway copy of
+the working tree installed from the lockfile, with bounded memory and CPU and one worker unless
+-j/--workers is given. Writes e2e-results.json and the HTML report into the checkout.
+  --update-snapshots  Copy the container's PNG baselines back into the checkout
+  --prebuilt DIR      Test this already-built output (inside the repository) instead of rebuilding
+  --force-resources   Run although the memory budget refuses; recorded
+  --timezone IANA     Run the whole suite in this timezone
+  --locale TAG        Run the whole suite in this locale
+Every other argument goes to \`playwright test\` (its own options: npx playwright test --help).
+Environment: WEB_HARNESS_E2E_MEMORY, WEB_HARNESS_E2E_CPUS, WEB_HARNESS_E2E_NETWORK=host|bridge.`;
+
 // The authoritative browser run: the working tree (tracked, modified and untracked-but-not-ignored
 // files) copied into a throwaway workspace, installed from the lockfile inside the Playwright image
 // that matches the project's Playwright version, and run with bounded memory and CPU. Pixel

@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "./config.mjs";
 
-// web-harness mutate [stryker args...]
-//
+export const usage = `Usage: web-harness mutate [stryker args...]
+Run Stryker in a throwaway copy of the working tree, installed offline from the store, so a mutation
+run never rewrites the checkout; reports (default reports/mutation) are copied back. Every argument
+goes to \`stryker run\` (its own options: npx stryker run --help). harness.config.mjs \`mutate\` sets
+the install command, the Stryker command and the report paths.`;
+
 // Stryker with `inPlace: true` rewrites source files while it runs; interrupt it, or run it in a
 // checkout someone else is using, and mutated code is left behind. Here it runs in a throwaway
 // copy of the working tree (tracked + modified + untracked-not-ignored), installed offline from

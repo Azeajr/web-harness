@@ -28,8 +28,8 @@ export const commands = [
   "describe",
 ];
 
-// One-shot tooling commands, each its own module (bin/web-harness.mjs dispatches them). Everything
-// else is the session controller.
+// One-shot tooling commands, each its own module exporting `main(argv)` and its `usage` text
+// (bin/web-harness.mjs dispatches them). Everything else is the session controller.
 export const toolCommands = {
   serve: "serve-cli.mjs",
   smoke: "smoke.mjs",
@@ -47,6 +47,13 @@ export const toolCommands = {
 // means nothing, and passed on it would tell Playwright or Stryker "what follows are file filters":
 // `e2e -- --shard=2/6` then ignored the shard and ran every test. Dropped here, once, for all tools.
 export const toolArguments = (args) => (args[0] === "--" ? args.slice(1) : args);
+
+// `--help` or `-h` anywhere in a tool's arguments prints that tool's `usage` and nothing else. The
+// bin answers it before the tool reads the config, so before any memory check, image pull, install,
+// build or suite: `e2e` and `mutate` hand unknown arguments to Playwright and Stryker, and `e2e
+// --help` used to start the whole suite. No tool takes `--help` or `-h` as a value or a file name.
+export const asksForHelp = (args) => args.some((arg) => arg === "--help" || arg === "-h");
+
 const baseValueOptions = [
   "session",
   "browser",
@@ -118,7 +125,8 @@ export function parseArgs(input, { extraValueOptions = [] } = {}) {
   let command;
   while (args.length) {
     const arg = args.shift();
-    if (arg.startsWith("--")) {
+    if (arg === "-h") options.help = true; // as for tool commands
+    else if (arg.startsWith("--")) {
       const [key, ...rest] = arg.slice(2).split("=");
       if (flagOptions.has(key)) {
         if (rest.length) throw new Error(`--${key} does not take a value.`);

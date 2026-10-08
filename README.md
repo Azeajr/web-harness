@@ -75,6 +75,10 @@ web-harness mutation-score [REPORT.json] [--min N]                   (Stryker sc
 web-harness bench [--repeat 5] [--port P] [--fixture F]              (harness timings, memory)
 ```
 
+`--help` (or `-h`) on any command prints its usage and runs nothing. `e2e` and `mutate` pass their
+other arguments to `playwright test` and `stryker run`; for those options, run
+`npx playwright test --help` or `npx stryker run --help`.
+
 Scheduled extended tier (mutation, E2E in other timezones or projects; failures open an issue):
 
 ```yaml

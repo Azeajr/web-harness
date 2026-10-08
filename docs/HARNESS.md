@@ -29,6 +29,12 @@ Every piece below serves a step of that loop. Where a piece cannot prove somethi
 | `bench`, manifest `metrics` | measure | Timings and peak memory of this host, image and project — conditions recorded, not universal budgets. |
 | `scope` / `setup` / `verdict` actions | ship | The required check always reports, and a skipped required lane fails it. |
 
+`--help` (or `-h`) on any command prints usage and does nothing else. A session command prints the
+session help, which lists the project's fixtures from `harness.config.mjs`. A tool command prints
+its own usage before it reads the config, checks memory, pulls an image, installs, builds or runs
+anything. `e2e` and `mutate` pass their other arguments to `playwright test` and `stryker run`; for
+those options run `npx playwright test --help` or `npx stryker run --help`.
+
 ## Adapter: `harness.config.mjs`
 
 Each project describes itself once. See `types/config.d.ts` for every field.
