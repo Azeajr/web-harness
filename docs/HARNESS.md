@@ -257,8 +257,13 @@ so a batch that reads it should assert visible UI or `durable` instead.
 
 The package ships `skills/web-harness/SKILL.md`: when to use the harness, the loop, what each
 command proves, the evidence rules and the proof boundaries — nothing project-specific.
-`web-harness skill install [--dir .claude/skills | .agents/skills]` copies it into the project
-(a copy, stamped with the version; `doctor` warns when the installed copy is from another version).
+`web-harness skill install` copies it into the project (a copy, stamped with the version; `doctor`
+warns when an installed copy is from another version). Claude Code loads project skills from
+`.claude/skills` alone and Codex reads `.agents/skills`, so a bare install writes `.claude/skills`
+and, when the project has `.agents/`, `.agents/skills` too; rerun it after an upgrade to refresh
+every copy. `--dir` (repeatable) writes only the directories named, and `doctor` warns when a
+project with `.claude/` has the skill only elsewhere. A project that ships `.claude/skills` to its
+own users (a Claude Code plugin, say) excludes the installed copy from what it ships.
 A project keeps its own skills for app-specific journeys and points them at this one.
 `web-harness describe --json` is the machine-readable project: fixtures with descriptions, state
 sections, scenarios and their status, targets, ports, environment, smoke hooks and every command.
