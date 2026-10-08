@@ -49,7 +49,9 @@ What each proves:
 - `run` — the batch's own `step`s and `assert`s held, and no fault was retained. A batch gets
   `{ step, assert, observe, state, effect, allowFault, expectFault, clock }`.
 - `effect` — something watched actually changed (`expect: 'change'`), or nothing did
-  (`expect: 'none'`). Catches the click that did nothing.
+  (`expect: 'none'`). Catches the click that did nothing. An observed element counts as changed
+  when its text, visibility, attributes, css or own scroll offset change, or when it crosses the
+  edge of the screen or of a scrolling pane; not when it only shifts on screen or takes focus.
 - `reload` keeps memory and storage; `restart` keeps only what persisted (the durability proof);
   `reset` starts over from the same fixture.
 - `check --a11y` — axe rules found nothing at or above the configured impact. Automated rules find

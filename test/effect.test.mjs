@@ -1,8 +1,61 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkExpectation, diffValues, settle, stableObservation } from "../src/effect.mjs";
+import { checkExpectation, diffValues, readWatched, settle, stableObservation } from "../src/effect.mjs";
+import { observe, readState } from "../src/inspect.mjs";
 
 const limits = { entries: 50, value: 200 };
+
+const rect = (x, y, width, height) => ({ x, y, left: x, top: y, width, height, right: x + width, bottom: y + height });
+
+// A 375×629 phone: a scrolling pane below a 60 px header holds `.board-stage` (a card with 16 px
+// gutters), which starts scrolled 823 px above the screen. A fake DOM run in Node, so the real observe() → stableObservation
+// → diff chain is exercised without a browser.
+function phone() {
+  const pane = { tagName: "DIV", id: "", parentElement: null, rect: rect(0, 60, 375, 569), overflow: "auto" };
+  const stage = {
+    tagName: "SECTION",
+    id: "",
+    parentElement: pane,
+    rect: rect(16, -823, 343, 375),
+    overflow: "visible",
+    innerText: "board",
+    scrollLeft: 0,
+    scrollTop: 0,
+    scrollWidth: 343,
+    scrollHeight: 375,
+    clientWidth: 343,
+    clientHeight: 375,
+    getAttribute: () => null,
+  };
+  for (const element of [pane, stage]) element.getBoundingClientRect = () => element.rect;
+  const page = {
+    url: () => "http://127.0.0.1:1/",
+    locator: (selector) => ({
+      evaluateAll: async (fn, arg) => {
+        const saved = { window: globalThis.window, document: globalThis.document, getComputedStyle: globalThis.getComputedStyle };
+        Object.assign(globalThis, {
+          window: { innerWidth: 375, innerHeight: 629, devicePixelRatio: 3 },
+          document: { activeElement: null },
+          getComputedStyle: (element) => ({
+            visibility: "visible",
+            display: "block",
+            overflowX: element.overflow,
+            overflowY: element.overflow,
+            getPropertyValue: () => "",
+          }),
+        });
+        try {
+          return fn(selector === ".board-stage" ? [stage] : [], arg);
+        } finally {
+          Object.assign(globalThis, saved);
+        }
+      },
+    }),
+  };
+  const lib = { observe, readState, stateSpec: { sections: [], defaults: [], read: null }, durable: null, stableObservation };
+  const read = () => readWatched(page, { observe: [".board-stage"] }, lib);
+  return { stage, read };
+}
 
 test("the diff lists changed paths with before and after, bounded", () => {
   const diff = diffValues(
@@ -16,6 +69,7 @@ test("the diff lists changed paths with before and after, bounded", () => {
     { path: "state.note.text", before: '"a"', after: '"b"' },
   ]);
   assert.equal(diff.unchangedCount, 3);
+  assert.deepEqual(diff.compared, { url: 1, state: 5 });
   const many = diffValues({ list: Array.from({ length: 60 }, () => 0) }, { list: Array.from({ length: 60 }, () => 1) }, limits);
   assert.equal(many.changed.length, 50);
   assert.equal(many.changedCount, 60);
@@ -24,13 +78,94 @@ test("the diff lists changed paths with before and after, bounded", () => {
   assert.ok(long.changed[0].after.length <= 201);
 });
 
-test("observations keep what a person sees, not focus or geometry", () => {
+test("observations keep what a person sees, on screen or not, but not focus or raw geometry", () => {
   const stable = stableObservation({
     count: 1,
-    viewport: { width: 1, height: 1 },
-    elements: [{ text: "Saved", visible: true, focused: true, box: { x: 1 }, scroll: {}, attributes: {}, css: {} }],
+    viewport: { width: 375, height: 629 },
+    elements: [
+      {
+        text: "Saved",
+        visible: true,
+        inViewport: true,
+        outsideViewport: { left: false, top: true, right: false, bottom: false },
+        box: { x: 0.4, y: -12.6, width: 80.2, height: 20.1 },
+        focused: true,
+        scroll: { left: 0.4, top: 239.6, width: 80, height: 900, clientWidth: 80, clientHeight: 20 },
+        clippedBy: [
+          { tag: "div", id: null, x: false, y: true },
+          { tag: "main", id: "workspace", x: true, y: true },
+        ],
+        attributes: {},
+        css: {},
+      },
+    ],
   });
-  assert.deepEqual(stable, { count: 1, elements: [{ text: "Saved", visible: true, attributes: {}, css: {} }] });
+  assert.deepEqual(stable, {
+    count: 1,
+    elements: [
+      {
+        text: "Saved",
+        visible: true,
+        inViewport: true,
+        outsideViewport: { left: false, top: true, right: false, bottom: false },
+        clippedBy: "div:y main#workspace:xy",
+        scroll: { left: 0, top: 240 },
+        attributes: {},
+        css: {},
+      },
+    ],
+  });
+});
+
+test("an element scrolled from off screen into view is a change; one that stayed put is not", async () => {
+  const { stage, read } = phone();
+  const before = await read();
+  // "Show board" ran scrollIntoView on it: same element, same text, now on screen.
+  stage.rect = rect(16, 111, 343, 375);
+  const after = await read();
+  const diff = diffValues(before.values, after.values, limits);
+  assert.equal(checkExpectation("effect", "change", diff, before, after), null, JSON.stringify(diff));
+  assert.deepEqual(
+    diff.changed.map(({ path, before: then, after: now }) => [path.replace("observe .board-stage.elements.0.", ""), then, now]),
+    [
+      ["clippedBy", '"div:y"', '""'],
+      ["inViewport", "false", "true"],
+      ["outsideViewport.top", "true", "false"],
+    ],
+  );
+  assert.match(checkExpectation("effect", "none", diff, before, after), /expected no change, but .*inViewport/);
+
+  // Read again without touching it: nothing changed, and the failure says what was compared.
+  const again = await read();
+  const same = diffValues(after.values, again.values, limits);
+  assert.equal(same.changedCount, 0);
+  assert.equal(checkExpectation("effect", "none", same, after, again), null);
+  assert.deepEqual(same.compared, { url: 1, "observe .board-stage": 13 });
+  assert.equal(same.unchangedCount, 14);
+  assert.equal(
+    checkExpectation("effect", "change", same, after, again),
+    "effect: no watched change (14 values compared: url ×1, observe .board-stage ×13). An observed element " +
+      "is compared by text, visible, inViewport, outsideViewport, clippedBy, scroll offsets, attributes " +
+      "and css, not by position, size or focus.",
+  );
+});
+
+test("sub-pixel and in-view moves are not changes; the element's own scrolling is", async () => {
+  const { stage, read } = phone();
+  stage.rect = rect(16, 111, 343, 375);
+  const before = await read();
+  // Layout jitter, and a banner above pushing it 40 px down while it stays on screen.
+  stage.rect = rect(16.3, 151.4, 343.2, 374.9);
+  const moved = await read();
+  assert.equal(diffValues(before.values, moved.values, limits).changedCount, 0);
+  // Scrolling the element itself changes what it shows; a sub-pixel scroll offset does not.
+  stage.scrollTop = 0.4;
+  const nudged = await read();
+  assert.equal(diffValues(moved.values, nudged.values, limits).changedCount, 0);
+  stage.scrollTop = 240;
+  const scrolled = await read();
+  const diff = diffValues(nudged.values, scrolled.values, limits);
+  assert.deepEqual(diff.changed, [{ path: "observe .board-stage.elements.0.scroll.top", before: "0", after: "240" }]);
 });
 
 test("expectations catch the quiet no-op, an unwanted change, and a wrong value", () => {
@@ -38,7 +173,7 @@ test("expectations catch the quiet no-op, an unwanted change, and a wrong value"
   const moved = diffValues({ a: 1 }, { a: 2 }, limits);
   const before = { values: { a: 1 } };
   const after = { values: { a: 2 } };
-  assert.match(checkExpectation("save", "change", same, before, before), /save: no watched change/);
+  assert.equal(checkExpectation("save", "change", same, before, before), "save: no watched change (1 value compared: a ×1).");
   assert.equal(checkExpectation("save", "change", moved, before, after), null);
   assert.equal(checkExpectation("cancel", "none", same, before, before), null);
   assert.match(checkExpectation("cancel", "none", moved, before, after), /expected no change, but a changed/);
