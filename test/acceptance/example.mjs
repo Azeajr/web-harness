@@ -47,7 +47,11 @@ export async function prepareExample() {
   const manifest = JSON.parse(await readFile(path.join(app, "package.json"), "utf8"));
   manifest.devDependencies["@azeajr/web-harness"] = "file:vendor/web-harness.tgz";
   await writeFile(path.join(app, "package.json"), JSON.stringify(manifest, null, 2) + "\n");
-  await must("npm", ["install", "--no-audit", "--no-fund"], { cwd: app });
+  // Resolve the complete dependency graph before installing platform-specific optional packages.
+  // A lock generated during installation can omit foreign Rollup binaries and fail npm ci in
+  // the pinned Playwright image. Use that same clean-install contract on the host as well.
+  await must("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: app });
+  await must("npm", ["ci", "--no-audit", "--no-fund"], { cwd: app });
   // The repository's copy ignores its lockfile (it would pin file:../..); this copy's lockfile pins
   // the tarball and is what the container E2E run installs from, so it must be tracked.
   const ignore = path.join(app, ".gitignore");
