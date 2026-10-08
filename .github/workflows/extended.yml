@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: Azeajr/web-harness/.github/actions/setup@v0.2.4
+      - uses: Azeajr/web-harness/.github/actions/setup@v0.2.5
         with:
           node-version: ${{ inputs.node-version }}
       - name: Mutation testing
@@ -94,7 +94,7 @@ jobs:
         timezone: ${{ fromJSON(inputs.timezones != '[]' && inputs.timezones || '["default"]') }}
         project: ${{ fromJSON(inputs.projects != '[]' && inputs.projects || '["all"]') }}
     steps:
-      - uses: Azeajr/web-harness/.github/actions/setup@v0.2.4
+      - uses: Azeajr/web-harness/.github/actions/setup@v0.2.5
         with:
           node-version: ${{ inputs.node-version }}
       - name: Container E2E
