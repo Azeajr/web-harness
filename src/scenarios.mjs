@@ -7,9 +7,16 @@ import { loadConfig } from "./config.mjs";
 import { sourceIdentity } from "./provenance.mjs";
 import { STATUS } from "./status.mjs";
 
-// web-harness scenarios [--results playwright-results.json] [--output FILE] [--allow-flaky]
-//                       [--lane NAME=REPORT.json]... [--build-digest SHA]
-//
+export const usage = `Usage: web-harness scenarios [--results REPORT.json] [--output FILE] [--allow-flaky]
+                             [--lane NAME=REPORT.json]... [--build-digest SHA]
+Judge the scenario inventory in harness.config.mjs: each scenario maps to tests that exist (and,
+given results, passed), to a CI lane, or says why it is unsupported. Exits 1 on any problem.
+  --results FILE         Playwright JSON results, e.g. e2e-results.json from web-harness e2e
+  --output FILE          Report to write (default .web-harness/scenarios.json)
+  --allow-flaky          Accept a test that passed only on retry (still reported as flaky)
+  --lane NAME=REPORT     A lane's report, which must have passed (repeatable)
+  --build-digest SHA     A build digest every other piece of evidence must agree with`;
+
 // The report names the source it judged (commit and a digest of uncommitted work), the results
 // file (by digest) and the build. A lane cover ({ lane: 'smoke' }) is held by the CI verdict unless
 // its report is given with --lane: then that report must have passed, on the same build as the

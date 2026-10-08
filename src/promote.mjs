@@ -5,9 +5,17 @@ import { Script } from "node:vm";
 import { loadConfig } from "./config.mjs";
 import { contained } from "./core.mjs";
 
-// web-harness promote BATCH_FILE --to tests/e2e/NAME.spec.ts --title "…" [--fixture NAME]
-//                    [--scenario ID] [--target dev|production] [--force]
-//
+export const usage = `Usage: web-harness promote BATCH_FILE --to tests/e2e/NAME.spec.ts --title "…" [--fixture NAME]
+                           [--scenario ID] [--target dev|production] [--force]
+Turn a batch that reproduced something into an ordinary Playwright test that seeds the same fixture
+and runs the batch unchanged; prints the scenario's \`covers\` entry instead of editing the config.
+  --to FILE       Spec to write, inside the project (required)
+  --title TEXT    The test's title (required)
+  --fixture NAME  Fixture to seed (default: the config's default fixture)
+  --scenario ID   Scenario the test covers
+  --target T      What the suite's webServer serves (default production when the project builds)
+  --force         Replace an existing spec`;
+
 // The last step of the loop: a batch that reproduced something becomes an ordinary test. The spec
 // imports the project's own `test` and `expect` (config e2e.fixtures), seeds with the same fixture
 // through applyHarnessFixture, and runs the batch function unchanged with batchHelpers — step is
@@ -68,7 +76,7 @@ export async function main(argv) {
     },
   });
   if (positionals.length !== 1 || !values.to || !values.title)
-    throw new Error('Usage: web-harness promote BATCH_FILE --to tests/e2e/NAME.spec.ts --title "…" [--fixture NAME] [--scenario ID]');
+    throw new Error(usage);
   const config = await loadConfig();
   const root = config.root;
   const inside = (value, label) => {

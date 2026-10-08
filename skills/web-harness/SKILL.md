@@ -17,6 +17,9 @@ print JSON. The full guide is `node_modules/@azeajr/web-harness/docs/HARNESS.md`
    budget, version drift and whether evidence is git-ignored. Fix what it reports first.
 3. Read the project's own skills and `CLAUDE.md`/`AGENTS.md` for app-specific journeys.
 
+`pnpm exec web-harness <command> --help` prints that command's usage and runs nothing; read it
+rather than guessing flags.
+
 ## The loop
 
 ```text

@@ -1,8 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
-// web-harness mutation-score [REPORT.json] [--min N]
-//
+export const usage = `Usage: web-harness mutation-score [REPORT.json] [--min N]
+Print the mutation score of a Stryker JSON report (default reports/mutation/mutation.json):
+killed and timed-out mutants over those plus survived and uncovered ones.
+  --min N  Exit 1 below N percent (0 to 100)`;
+
 // Reads a Stryker JSON report (the `json` reporter; reports/mutation/mutation.json by default) and
 // prints the mutation score: detected (killed, timed out) over detected plus undetected (survived,
 // no coverage). Mutants that did not compile or run, or were ignored, are counted but not scored.

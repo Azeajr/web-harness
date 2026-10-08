@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { devices } from "playwright";
 import { batchSource } from "../src/batch.mjs";
@@ -12,6 +14,7 @@ import { observe, readState } from "../src/inspect.mjs";
 import { faultPolicy } from "../src/faults.mjs";
 import {
   acquirePortLease,
+  asksForHelp,
   availablePort,
   deviceFor,
   directoryDigest,
@@ -28,6 +31,7 @@ import {
   slug,
   targetUrl,
   toolArguments,
+  toolCommands,
 } from "../src/core.mjs";
 
 const policy = faultPolicy();
@@ -72,6 +76,9 @@ test("structured commands require explicit targets and preserve selectors and fi
   for (const args of [["observe"], ["run"], ["state", "extra"], ["run", "a", "b"]])
     assert.throws(() => parseArgs(args));
   assert.equal(parseArgs(["run", "--help"]).options.help, true);
+  assert.equal(parseArgs(["start", "-h"]).options.help, true);
+  assert.equal(parseArgs(["-h"]).command, "help");
+  assert.deepEqual(parseArgs(["cli", "-h"]).positional, ["-h"], "the Playwright CLI's own -h");
   for (const command of ["reload", "restart", "doctor"]) assert.equal(parseArgs([command]).command, command);
 });
 
@@ -439,4 +446,70 @@ test("a separator right after a tool command is dropped, and only there", () => 
   assert.deepEqual(toolArguments(["--shard=2/6"]), ["--shard=2/6"]);
   assert.deepEqual(toolArguments(["--grep", "x", "--", "tests/a.spec.ts"]), ["--grep", "x", "--", "tests/a.spec.ts"]);
   assert.deepEqual(toolArguments([]), []);
+});
+
+test("--help or -h anywhere in a tool's arguments asks for its usage", () => {
+  for (const args of [["--help"], ["-h"], ["tests/a.spec.ts", "--grep", "x", "--help"], ["--update-snapshots", "-h"]])
+    assert.equal(asksForHelp(args), true, args.join(" "));
+  for (const args of [[], ["--grep", "help"], ["--headed"], ["-j", "2"], ["--helpful"]])
+    assert.equal(asksForHelp(args), false, args.join(" "));
+});
+
+// `e2e --help` fell through to `playwright test`: it pulled the image, installed in the container
+// and ran the whole suite. Here every tool runs in a configured project whose PATH holds only
+// stand-ins for docker, git and the package managers, each recording that it was called.
+test("--help on every tool command prints its usage, exits 0 and starts nothing", async () => {
+  const bin = fileURLToPath(new URL("../bin/web-harness.mjs", import.meta.url));
+  const base = await mkdtemp(path.join(os.tmpdir(), "wh-help-"));
+  const project = path.join(base, "project");
+  const fakes = path.join(base, "bin");
+  const calls = path.join(base, "calls.log");
+  const cli = (cwd, args) =>
+    new Promise((resolve) =>
+      execFile(
+        process.execPath,
+        [bin, ...args],
+        { cwd, timeout: 30_000, env: { ...process.env, PATH: fakes } },
+        (error, stdout, stderr) => resolve({ code: error ? (error.code ?? error.signal) : 0, stdout, stderr }),
+      ),
+    );
+  const called = () => readFile(calls, "utf8").catch(() => "");
+  try {
+    await mkdir(project, { recursive: true });
+    await mkdir(fakes);
+    for (const tool of ["docker", "git", "pnpm", "npm", "npx", "corepack"])
+      await writeFile(path.join(fakes, tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(calls)}\n`, {
+        mode: 0o755,
+      });
+    await writeFile(
+      path.join(project, "harness.config.mjs"),
+      `export default { name: "demo", playwrightFrom: ${JSON.stringify(fileURLToPath(new URL("..", import.meta.url)))},
+        dev: { command: (port) => ["vite", "--port", String(port)] } };`,
+    );
+    await writeFile(path.join(project, "pnpm-lock.yaml"), "");
+    const before = (await readdir(project, { recursive: true })).sort();
+    const runs = Object.keys(toolCommands).flatMap((command) =>
+      [["--help"], ["-h"], ["--", "--help"]].map((flags) => ({ command, args: [command, ...flags] })),
+    );
+    runs.push({ command: "e2e", args: ["e2e", "tests/a.spec.ts", "--update-snapshots", "--help"] });
+    const results = await Promise.all(runs.map(({ args }) => cli(project, args)));
+    runs.forEach(({ command, args }, index) => {
+      const { code, stdout, stderr } = results[index];
+      assert.equal(code, 0, `${args.join(" ")}: ${stderr}`);
+      assert.ok(stdout.startsWith(`Usage: web-harness ${command} `), `${args.join(" ")}: ${stdout}`);
+    });
+    assert.match(results[runs.findIndex(({ command }) => command === "e2e")].stdout, /--prebuilt DIR[\s\S]*playwright test/);
+    assert.equal(await called(), "", "no tool reached docker, git or an install");
+    assert.deepEqual((await readdir(project, { recursive: true })).sort(), before, "nothing was written");
+    const unconfigured = await cli(base, ["e2e", "--help"]);
+    assert.equal(unconfigured.code, 0, `answered before the config is read: ${unconfigured.stderr}`);
+    // The stand-ins do catch a run: without --help the same commands reach them.
+    for (const [command, first] of [["e2e", /^docker /m], ["mutate", /^git /m]]) {
+      await rm(calls, { force: true });
+      await cli(project, [command]);
+      assert.match(await called(), first, `${command} without --help`);
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });

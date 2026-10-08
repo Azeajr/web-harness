@@ -1,8 +1,11 @@
 import { directoryDigest } from "./core.mjs";
 
-// web-harness digest DIR [--expect SHA]
-// Prints the content digest of a build; with --expect, fails unless it matches. CI records the
-// digest of the artifact the checks produced and the deploy verifies it before shipping.
+export const usage = `Usage: web-harness digest DIR [--expect SHA]
+Print the content digest of a build directory (sha256 over every file's path and bytes).
+  --expect SHA  Exit 1 unless the digest is SHA`;
+
+// CI records the digest of the artifact the checks produced and the deploy verifies it before
+// shipping.
 export async function main(argv) {
   const [dir, flag, expected] = argv;
   if (!dir) throw new Error("digest requires a directory.");

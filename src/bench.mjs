@@ -8,8 +8,17 @@ import { loadConfig } from "./config.mjs";
 import { summarize } from "./metrics.mjs";
 import { formatSize } from "./resources.mjs";
 
-// web-harness bench [--repeat 5] [--port P] [--fixture NAME] [--target dev|production]
-//
+export const usage = `Usage: web-harness bench [--repeat 5] [--port P] [--fixture NAME] [--target dev|production]
+                         [--session NAME]
+Time one fixed session sequence per repetition (start, three state reads, the same three in one
+batch, reload, restart, reset, stop); print each step's median and p90 and write them to
+.web-harness/bench/. Heavy: a full session per repetition, so run it alone.
+  --repeat N      Repetitions, 1 to 50 (default 5)
+  --port P        Session port (default the config's port)
+  --fixture NAME  Fixture to start with (default the config's default fixture)
+  --target T      dev or production (default dev)
+  --session NAME  Session name (default bench)`;
+
 // Measures the harness on this project with one fixed sequence, repeated: start; three `state`
 // reads as separate commands, then the same three in one batch (the batching claim, measured);
 // reload; restart; reset; stop. Prints the median and p90 of each step with the conditions they

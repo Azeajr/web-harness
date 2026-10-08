@@ -13,8 +13,13 @@ import { failures } from "./faults.mjs";
 import { createStaticServer } from "./static-server.mjs";
 import { watchContext } from "./watch.mjs";
 
-// web-harness smoke [--dist DIR] [--output DIR]
-//
+export const usage = `Usage: web-harness smoke [--dist DIR] [--output DIR] [--headed]
+Prove the production build in a fresh host Chromium profile, served the way Pages serves it:
+headers, bundle, globals, a11y, sw, persist, offline, online, update, faults. Exits 1 on a failure.
+  --dist DIR    Build to check (default smoke.dist in harness.config.mjs, else dist)
+  --output DIR  Report directory (default .web-harness/smoke)
+  --headed      Show the browser`;
+
 // The production proof every deploy waits for. Against the built bytes, served the way the host
 // serves them, in a fresh Chromium profile:
 //   1. headers   every required header (and value) on every named path

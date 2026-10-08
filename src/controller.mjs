@@ -182,8 +182,9 @@ Usage: web-harness [--session NAME] <command> [options]
   reconcile       After a batch whose outcome is unknown (a transport timeout): capture the
                   current state beside it and allow runs again (or pass run --after-unknown)
   describe [--json]  This project as an agent needs it: fixtures, state, scenarios, targets, commands
-Tools: serve, smoke, e2e, scenarios, mutate, mutation-score, digest, bench [--repeat N],
-  promote BATCH --to SPEC --title T, skill install [--dir .claude/skills|.agents/skills]...
+Tools (\`web-harness TOOL --help\` prints a tool's usage and runs nothing): serve, smoke, e2e,
+  scenarios, mutate, mutation-score, digest, bench [--repeat N], promote BATCH --to SPEC --title T,
+  skill install [--dir .claude/skills|.agents/skills]...
 
 Start/preflight: --target dev|production (default dev) --fixture NAME
   --browser ${config.defaults.browser} --device "${config.defaults.device}"

@@ -3,9 +3,13 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { ownVersion } from "./versions.mjs";
 
-// web-harness skill install [--dir .claude/skills] [--dir .agents/skills]
-// web-harness skill show
-//
+export const usage = `Usage: web-harness skill install [--dir DIR]...
+       web-harness skill [show]
+  install    Copy the shipped agent skill, stamped with this version, into .claude/skills and
+             every other agent skills directory the project has (.agents/skills)
+  --dir DIR  Install into DIR (inside the project) instead (repeatable)
+  show       Print the skill (the default)`;
+
 // The package ships one generic agent skill (skills/web-harness/SKILL.md): when to use the
 // harness, the loop, what each command proves, the evidence rules and the proof boundaries. A
 // project installs a copy — not a symlink, node_modules paths move — stamped with the version it
@@ -86,7 +90,7 @@ export async function main(argv, { root = process.cwd() } = {}) {
   const [action = "show", ...rest] = argv;
   const { values } = parseArgs({ args: rest, options: { dir: { type: "string", multiple: true } }, strict: true });
   if (action === "show") return void process.stdout.write(await readSkill());
-  if (action !== "install") throw new Error("Usage: web-harness skill install [--dir .claude/skills]... | skill show");
+  if (action !== "install") throw new Error(usage);
   const directories = (values.dir ?? (await installTargets(root))).map((directory) => {
     const relative = path.relative(root, path.resolve(root, directory));
     if (relative.startsWith("..")) throw new Error(`--dir must be inside the project (${root}).`);
