@@ -115,7 +115,10 @@ together (`web-harness doctor` warns when a workflow's `uses:` differs from the 
 1. Merge to `main` with `verdict` green (it includes the acceptance suite).
 2. Bump `version` in `package.json`, every `#vX.Y.Z` / `@vX.Y.Z` in this README, and the
    `setup@vX.Y.Z` references in `.github/workflows/extended.yml` (a unit test holds them equal).
-3. Tag `vX.Y.Z` on the merge commit and push the tag.
+3. Run the **Release tag** workflow on `main` after CI passes. It reads the version from
+   `package.json`, requires successful push CI on that exact commit, and creates `vX.Y.Z`.
+   Retrying the same commit is safe; an existing tag is never moved. Tags created with the
+   workflow token do not trigger another CI run; the checked main run is the release proof.
 4. In each consumer: bump the dependency and every `uses: Azeajr/web-harness/...@vX.Y.Z` in one PR.
 
 ## License
