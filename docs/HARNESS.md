@@ -411,11 +411,14 @@ saves. Use these measurements to check whether the default memory bounds suit th
 
 ## Limits
 
-- Linux only (Docker host networking, `/proc` ownership checks).
+- Sessions (`start`, `run` and the other session commands) are Linux only (Docker host networking,
+  `/proc` ownership checks). `smoke` and container `e2e` also run on macOS with Docker Desktop: the
+  suite runs inside the container, and the memory budget is the Docker VM's.
 - Container CPU bounds default to at most the host's cores (Docker refuses more): 4 for E2E, 2 for
   sessions. A private repository's GitHub-hosted runner has 2 cores.
-- **Memory budget.** `start`/`preflight` and `e2e` read `/proc/meminfo` and refuse to start a
-  container the host cannot hold: its bound (plus the host server's heap for a session) plus a
+- **Memory budget.** `start`/`preflight` and `e2e` read `/proc/meminfo` of the machine that runs
+  the containers (on macOS Docker's VM, through a throwaway container of the pinned image) and
+  refuse to start a container it cannot hold: its bound (plus the host server's heap for a session) plus a
   margin must fit in `MemAvailable`, less what running harness containers may still grow into up to
   their own bounds. A session defaults to a 1.5 GiB browser container and a 256 MiB host server
   V8 heap; the latter does not bound the server's child processes. The margin is 1.5 GiB, or 2 GiB
