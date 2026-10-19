@@ -9,6 +9,7 @@ import {
   marginFor,
   parseMeminfo,
   parseSize,
+  readMemory,
 } from "../src/resources.mjs";
 
 const GIB = 1024 ** 3;
@@ -86,18 +87,41 @@ test("harness containers come from labels and the E2E name prefix, with sampled 
 });
 
 test("checkBudget refuses with the reason and proceeds only when forced", async () => {
-  const docker = async () => "";
-  // Ask for more than any host has, so the result does not depend on this machine.
+  // A Docker VM with 9 GiB available, so the result does not depend on this machine.
+  const docker = async (args) => (args[0] === "run" ? meminfo(9, 0) : "");
+  const vm = { docker, image: "img", platform: "darwin" };
   const need = 10_000 * GIB;
   await assert.rejects(
-    checkBudget({ docker, need, label: "Session" }),
+    checkBudget({ ...vm, need, label: "Session" }),
     /Short by [\d.]+ GiB\. Free host memory[\s\S]*Do not poll/,
   );
-  const forced = await checkBudget({ docker, need, label: "Session", force: true });
+  const forced = await checkBudget({ ...vm, need, label: "Session", force: true });
   assert.equal(forced.ok, false);
   assert.equal(forced.forced, true);
-  const easy = await checkBudget({ docker, need: 1, label: "Session", env: { WEB_HARNESS_MEMORY_MARGIN: "1" } });
+  const easy = await checkBudget({ ...vm, need: 1, label: "Session", env: { WEB_HARNESS_MEMORY_MARGIN: "1" } });
   assert.equal(easy.forced, false);
+  assert.equal(easy.available, 9 * GIB);
+});
+
+test("off Linux the budget is Docker's VM, read through the run's own image", async () => {
+  const calls = [];
+  const docker = async (args) => {
+    calls.push(args.join(" "));
+    return meminfo(7, 1);
+  };
+  const memory = await readMemory({ docker, image: "mcr.microsoft.com/playwright:v1.0.0-noble", platform: "darwin" });
+  assert.equal(memory.available, 7 * GIB);
+  assert.equal(memory.swapTotal, GIB);
+  assert.deepEqual(calls, [
+    "run --rm --network none --entrypoint cat mcr.microsoft.com/playwright:v1.0.0-noble /proc/meminfo",
+  ]);
+  await assert.rejects(readMemory({ docker, platform: "darwin" }), /Docker's VM's: pass the run's image/);
+});
+
+test("on Linux the budget reads the host's own meminfo", { skip: process.platform !== "linux" }, async () => {
+  const docker = async () => assert.fail("no container on Linux");
+  const memory = await readMemory({ docker, image: "img", platform: "linux" });
+  assert.ok(memory.total > 0 && memory.available > 0);
 });
 
 test("e2e passes every argument it does not own through to Playwright", () => {

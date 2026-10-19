@@ -837,6 +837,7 @@ Guide: https://github.com/Azeajr/web-harness/blob/main/docs/HARNESS.md`);
       need: parseSize(containerMemory) + Number(serverHeapMb) * 1024 ** 2,
       label: "Session",
       force: options["force-resources"],
+      image,
     });
     if (resources.forced) console.error(describeBudget(resources, "Session (forced)"));
     const probeName = `wh-probe-${randomUUID()}`;

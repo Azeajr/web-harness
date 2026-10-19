@@ -120,6 +120,7 @@ export async function main(argv) {
     need: requested ? parseSize(requested) : E2E_MEMORY_FLOOR,
     label: "Container E2E",
     force: forceResources,
+    image,
   });
   const dockerMemory =
     requested ??

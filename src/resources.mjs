@@ -2,7 +2,8 @@ import { readFile } from "node:fs/promises";
 
 // Headroom before a heavy run. A no-swap host stalled under memory pressure on 2026-09-27 when
 // container E2E and a native multi-worker run started side by side. Every command that starts a
-// bounded container (a session's browser, a container E2E run) checks here first.
+// bounded container (a session's browser, a container E2E run) checks here first, against the
+// memory of the machine that runs the containers (readMemory).
 
 const GIB = 1024 ** 3;
 const UNITS = { b: 1, k: 1024, m: 1024 ** 2, g: GIB };
@@ -112,13 +113,29 @@ export async function harnessContainers(docker) {
   return containers;
 }
 
-export async function readMemory() {
-  return parseMeminfo(await readFile("/proc/meminfo", "utf8"));
+// The memory containers draw on. On Linux that is the host's. Elsewhere Docker runs them in a
+// Linux VM (Docker Desktop on macOS), so the budget is the VM's, read through a throwaway
+// container of the run's own image: the same /proc/meminfo, so the same rules apply.
+export async function readMemory({ docker, image, platform = process.platform } = {}) {
+  if (platform === "linux") return parseMeminfo(await readFile("/proc/meminfo", "utf8"));
+  if (!docker || !image)
+    throw new Error(`On ${platform} the memory budget is Docker's VM's: pass the run's image.`);
+  return parseMeminfo(
+    await docker(["run", "--rm", "--network", "none", "--entrypoint", "cat", image, "/proc/meminfo"]),
+  );
 }
 
 // Check, and refuse unless forced. Returns the budget for the manifest either way.
-export async function checkBudget({ docker, need, label, force = false, env = process.env }) {
-  const memory = await readMemory();
+export async function checkBudget({
+  docker,
+  need,
+  label,
+  force = false,
+  env = process.env,
+  image,
+  platform = process.platform,
+}) {
+  const memory = await readMemory({ docker, image, platform });
   const budget = decideBudget({
     memory,
     containers: await harnessContainers(docker),
