@@ -275,7 +275,13 @@ export async function main(argv) {
     assertNotInterrupted();
     const command = [
       "set -eu",
-      // The image ships Node with corepack; a pnpm shim keeps the lockfile's pnpm major.
+      // A pnpm shim through corepack keeps the lockfile's pnpm major. Images with Node 25 or later
+      // (v1.64.1-noble as republished on 2026-11-01) no longer ship corepack, so it is installed
+      // under /tmp: the container runs as the caller, who cannot write Node's global prefix.
+      "if ! command -v corepack >/dev/null 2>&1; then",
+      "  npm install --silent --no-audit --no-fund --prefix /tmp/corepack corepack",
+      "  export PATH=/tmp/corepack/node_modules/.bin:$PATH",
+      "fi",
       "mkdir -p /tmp/pnpm-bin",
       String.raw`printf '%s\n' '#!/bin/sh' 'exec corepack pnpm "$@"' > /tmp/pnpm-bin/pnpm`,
       "chmod +x /tmp/pnpm-bin/pnpm",
