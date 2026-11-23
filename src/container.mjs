@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { availableParallelism, tmpdir } from "node:os";
+import { availableParallelism } from "node:os";
 import path from "node:path";
+import { makeWorkspaceRoot } from "./hostenv.mjs";
 import { directoryDigest, imageFor, run } from "./core.mjs";
 import { loadConfig } from "./config.mjs";
 import { checkBudget, describeBudget, parseSize } from "./resources.mjs";
@@ -132,7 +133,7 @@ export async function main(argv) {
   const callerSetWorkers = playwrightArgs.some(
     (arg) => arg === "--workers" || arg === "-j" || /^(--workers|-j)=/.test(arg),
   );
-  const temporaryRoot = await mkdtemp(path.join(tmpdir(), `wh-e2e-${config.name}-`));
+  const temporaryRoot = await makeWorkspaceRoot(`wh-e2e-${config.name}-`);
   const workspace = path.join(temporaryRoot, "work");
   const containerName = `wh-e2e-${config.name}-${process.pid}`;
   let activeDocker;
