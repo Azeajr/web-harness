@@ -45,3 +45,15 @@ export function serverEnvironment(env, { home, allow = [], realHome = os.homedir
   if (!result.COREPACK_HOME) result.COREPACK_HOME = path.join(realHome, ".cache/node/corepack");
   return { env: result, isolated: true, passed: passed.sort(), dropped: dropped.sort() };
 }
+
+// Scratch workspaces for container E2E and mutation runs copy the whole project plus its
+// node_modules (often over 1 GB). /tmp is tmpfs on many hosts, so a workspace there is held in RAM
+// and competes with the container's own memory budget. Keep them on disk under the user cache.
+export async function makeWorkspaceRoot(prefix, env = process.env) {
+  const { mkdir, mkdtemp } = await import("node:fs/promises");
+  const base =
+    env.WEB_HARNESS_WORKDIR ||
+    path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "web-harness", "work");
+  await mkdir(base, { recursive: true, mode: 0o700 });
+  return mkdtemp(path.join(base, prefix));
+}

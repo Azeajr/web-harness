@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, cp, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import { makeWorkspaceRoot } from "./hostenv.mjs";
 import { loadConfig } from "./config.mjs";
 
 export const usage = `Usage: web-harness mutate [stryker args...]
@@ -52,7 +52,7 @@ export async function main(argv) {
     reports: ["reports/mutation"],
     ...config.mutate,
   };
-  const temporaryRoot = await mkdtemp(path.join(tmpdir(), `wh-mutate-${config.name}-`));
+  const temporaryRoot = await makeWorkspaceRoot(`wh-mutate-${config.name}-`);
   const workspace = path.join(temporaryRoot, "work");
   try {
     for (const relative of new Set(await listFiles(config.root))) {
