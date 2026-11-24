@@ -112,14 +112,14 @@ container E2E run — so run it alone. It needs Docker, the Playwright image for
 Released by tag. Consumers pin a tag in both the dependency and the `uses:` references; bump them
 together (`web-harness doctor` warns when a workflow's `uses:` differs from the installed version).
 
-1. Merge to `main` with `verdict` green (it includes the acceptance suite).
-2. Bump `version` in `package.json`, every `#vX.Y.Z` / `@vX.Y.Z` in this README, and the
-   `setup@vX.Y.Z` references in `.github/workflows/extended.yml` (a unit test holds them equal).
-3. Run the **Release tag** workflow on `main` after CI passes. It reads the version from
-   `package.json`, requires successful push CI on that exact commit, and creates `vX.Y.Z`.
-   Retrying the same commit is safe; an existing tag is never moved. Tags created with the
-   workflow token do not trigger another CI run; the checked main run is the release proof.
-4. In each consumer: bump the dependency and every `uses: Azeajr/web-harness/...@vX.Y.Z` in one PR.
+1. In the PR that carries the change (or a follow-up PR), run `pnpm release X.Y.Z`. It sets
+   `version` in `package.json` and every `#vX.Y.Z` / `@vX.Y.Z` pin in the README and workflows
+   (a unit test holds them equal). A PR that changes only versions skips the acceptance suite.
+2. Merge with `verdict` green. When push CI on `main` passes, the **Release tag** workflow runs by
+   itself and creates `vX.Y.Z` on that commit; commits whose version is already tagged are left
+   alone. An existing tag is never moved, and tags created with the workflow token do not trigger
+   another CI run; the checked main run is the release proof. It can also be run by hand to retry.
+3. In each consumer: bump the dependency and every `uses: Azeajr/web-harness/...@vX.Y.Z` in one PR.
 
 ## License
 
