@@ -1,6 +1,13 @@
 name: Release tag
 
+# Runs by itself after every successful push CI on main, and tags the commit when package.json
+# carries a version that has no tag yet. Ordinary commits find their version already tagged and
+# do nothing. workflow_dispatch remains for retrying by hand.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,13 +20,16 @@ concurrency:
 
 jobs:
   tag:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' ||
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: actions/github-script@v8
         with:
           script: |
@@ -28,7 +38,8 @@ jobs:
             if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Expected a stable semantic version');
             const tag = `v${version}`;
             const repo = context.repo;
-            const sha = context.sha;
+            const sha = context.payload.workflow_run?.head_sha ?? context.sha;
+            const automatic = context.eventName === 'workflow_run';
             const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               ...repo, workflow_id: 'ci.yml', head_sha: sha, event: 'push', per_page: 100,
             });
@@ -38,6 +49,10 @@ jobs:
             try {
               const existing = await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
               if (existing.data.object.type !== 'commit' || existing.data.object.sha !== sha) {
+                if (automatic) {
+                  core.notice(`${tag} is already released; bump package.json to release this commit`);
+                  return;
+                }
                 throw new Error(`${tag} already exists at a different object; refusing to move it`);
               }
               core.notice(`${tag} already points to ${sha}`);

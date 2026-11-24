@@ -30,7 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.scope.outputs.code }}
+      # A release bump changes only version strings: the unit tests check those, so the
+      # browser acceptance suite (which already passed on the code being released) is skipped.
+      code: ${{ steps.release.outputs.only == 'true' && 'false' || steps.scope.outputs.code }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,6 +44,14 @@ jobs:
       - run: test -n "$CODE"
         env:
           CODE: ${{ steps.scope.outputs.code }}
+      - id: release
+        if: steps.scope.outputs.code == 'true'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "only=$(node scripts/release.mjs version-only "$BASE" "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+          fi
 
   # Real sessions, smoke and container E2E against examples/minimal, through a packed install:
   # the only proof that start/run/restart/reset/stop and the ownership refusals work end to end.
